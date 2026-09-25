@@ -39,6 +39,62 @@ pub struct Config {
     pub decision_service: DecisionServiceConfig,
     #[serde(default)]
     pub openrouter: OpenRouterConfig,
+    #[serde(default)]
+    pub fusion: FusionConfig,
+}
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FusionRole {
+    pub client: String,
+    pub model: String,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FusionConfig {
+    pub lead: FusionRole,
+    pub sidekick: FusionRole,
+    #[serde(default = "default_fusion_corrections")]
+    pub max_corrections: u8,
+    #[serde(default = "default_fusion_chars")]
+    pub max_handoff_chars: usize,
+    #[serde(default = "default_fusion_timeout")]
+    pub timeout_secs: u64,
+    #[serde(default)]
+    pub validation: Vec<FusionValidation>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FusionValidation {
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+fn default_fusion_corrections() -> u8 {
+    1
+}
+fn default_fusion_chars() -> usize {
+    6000
+}
+fn default_fusion_timeout() -> u64 {
+    900
+}
+impl Default for FusionConfig {
+    fn default() -> Self {
+        Self {
+            lead: FusionRole {
+                client: "codex".into(),
+                model: "gpt-6-astra".into(),
+            },
+            sidekick: FusionRole {
+                client: "codex".into(),
+                model: "gpt-5.6-sol".into(),
+            },
+            max_corrections: default_fusion_corrections(),
+            max_handoff_chars: default_fusion_chars(),
+            timeout_secs: default_fusion_timeout(),
+            validation: Vec::new(),
+        }
+    }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

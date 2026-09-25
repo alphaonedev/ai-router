@@ -8,6 +8,7 @@ use std::{
     path::PathBuf,
     process::Command,
 };
+mod fusion;
 mod observability;
 #[derive(Parser)]
 #[command(
@@ -25,6 +26,15 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Run a persistent lead and sidekick workflow from TOML roles.
+    Fusion {
+        #[arg(long)]
+        task: String,
+        #[arg(long, default_value = ".")]
+        workdir: PathBuf,
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Check configured OpenRouter model IDs against the live catalog.
     OpenrouterModels,
     /// Compile and download a PAW classifier program (requires --features paw and PAW credentials).
@@ -186,6 +196,26 @@ fn cache(cli: &Cli) -> Option<PathBuf> {
 fn main() -> Result<(), String> {
     let cli = Cli::parse();
     match &cli.command {
+        Action::Fusion {
+            task,
+            workdir,
+            dry_run,
+        } => {
+            let cfg = load_config(&cli.config)?;
+            if *dry_run {
+                println!("{}", fusion::dry_plan(&cfg, workdir)?);
+            } else {
+                let report = fusion::run(&cfg, task, workdir, cache(&cli).as_deref())?;
+                println!(
+                    "{}",
+                    serde_json::to_string(&report).map_err(|e| e.to_string())?
+                );
+                if report.outcome != "accepted" {
+                    return Err("fusion ended without lead acceptance".into());
+                }
+            }
+            Ok(())
+        }
         Action::OpenrouterModels => {
             let cfg = load_config(&cli.config)?;
             let catalog = openrouter_models(&cfg.openrouter)?;

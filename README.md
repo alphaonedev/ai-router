@@ -1,6 +1,6 @@
 # ai-router
 
-Local-first, cost-aware model selection for Claude Code CLI, OpenAI Codex CLI, Grok Build CLI, and one-shot OpenRouter API calls. The router, adapters, evaluation tools, and optional PAW integration are written in Rust. It selects a model before a **new task or session** and leaves provider execution to the installed harness.
+Local-first, cost-aware model selection and opt-in lead–sidekick coding workflow for Claude Code CLI, OpenAI Codex CLI, Grok Build CLI, and one-shot OpenRouter API calls. The router, coordinator, adapters, evaluation tools, and optional PAW integration are written in Rust.
 
 **Status:** integration-ready routing baseline. On 25 September 2026, routed fast, balanced, and deep invocations were tested through all three installed CLIs on macOS. The 50%+ realized compute regain target is **not yet demonstrated** on a representative workload.
 
@@ -36,6 +36,17 @@ These start noninteractive sessions using `claude --print`, `codex exec`, and `g
 
 Any arguments after `--` are passed to the underlying CLI. Model and effort flags must be set through ai-router options or `router.toml` to keep the displayed decision consistent with the launched command. The router does not take over an existing session or change its model mid-conversation.
 
+## Fusion workflow
+
+Inspired by [Cognition's Local Fusion architecture](https://cognition.com/blog/local-fusion), `fusion` runs a lead planning phase, a sidekick implementation phase, local validation, and a lead review. The lead works in an isolated copy of Git-tracked and nonignored untracked files, refreshed before review; the sidekick works in the original repository. The copy prevents accidental relative-path writes by the lead from changing original files; it is not an OS security sandbox for absolute paths or external tools. The lead and sidekick keep separate resumable CLI sessions on fixed models. A review requesting changes sends bounded feedback to the same sidekick session, then returns to the same lead session. Roles, handoff size, correction limit, per-phase timeout, and validation commands live in `[fusion]`, `[fusion.lead]`, `[fusion.sidekick]`, and `[[fusion.validation]]` in `router.toml`. Validation commands run by the Rust coordinator in the workdir and must pass before acceptance. The selected models must be in the relevant allowlists. The lead's `DECISION: ACCEPT` is an agent review result, not a substitute for independent validation.
+
+```sh
+./target/release/ai-router fusion --task 'Add tests for the parser' --dry-run
+./target/release/ai-router fusion --task 'Add tests for the parser' --workdir .
+```
+
+The command prints a JSON report with phase durations, model IDs, input/output and cache token fields when reported, validation results, provider-reported API cost, and review outcome. CLI subscription usage does not necessarily have a dollar price; `total_cost_usd` remains null when a harness does not report it. Provider usage fields have different meanings and are not directly comparable as billable compute without price and cache adjustments. The lead also receives a bounded git status and tracked diff excerpt; it can inspect the copied files directly. Snapshots have a 256 MiB limit and reject symlinks and non-UTF8 paths. The workflow does not commit or push. It cannot attach to this already-running Codex conversation; launch a new task through `fusion` to use it. The optional local Kev model classifies routing tasks and does not act as a coding sidekick.
+
 ## Integrate with another harness
 
 The library exports typed `Request`, `Decision`, and `route` APIs. The CLI also accepts one JSON request from stdin and returns one JSON decision on stdout:
@@ -57,7 +68,7 @@ Every decision made with a cache directory writes a small event to `events.jsonl
 ./target/release/ai-router dashboard --port 8747
 ```
 
-The dashboard runs on `http://127.0.0.1:8747/` and refreshes every two seconds. It shows recent decisions, model and tier mix, source mix, cache reuse, and p50/p95 routing latency. Both views accept `--measurements path/to/measurements.jsonl` to display compute regain from a separate matched comparison. No savings percentage is inferred from routing events alone. The dashboard is rendered by Rust and uses HTML/CSS with no JavaScript or external application service; Google Fonts are optional. It binds only to localhost.
+The dashboard runs on `http://127.0.0.1:8747/` and refreshes every two seconds. It shows recent decisions, model and tier mix, source mix, cache reuse, and p50/p95 routing latency. Fusion also writes phase status and usage to `fusion-events.jsonl`; the dashboard and terminal watch show this stream. Prompt text and review prose are never logged. Both views accept `--measurements path/to/measurements.jsonl` to display compute regain from a separate matched comparison. No savings percentage is inferred from routing events alone. The dashboard is rendered by Rust and uses HTML/CSS with no JavaScript or external application service; Google Fonts are optional. It binds only to localhost.
 
 ## Optional decision backends: PAW, local System One, Jev
 
@@ -93,7 +104,7 @@ No optional decision backend is active in the checked-in configuration. No API c
 OPENROUTER_API_KEY=... ./target/release/ai-router run openrouter --task 'Summarize this function'
 ```
 
-The final command uses [OpenRouter's chat completions API](https://openrouter.ai/docs/quickstart) and prints the response plus reported token usage. It requires a key and network connection and supports single-turn text tasks; it does not replace a coding harness's tool loop or its subscription billing. The endpoint can be changed in TOML for a compatible local test server. Remote endpoints must use HTTPS. No live paid OpenRouter call was made during development because no `OPENROUTER_API_KEY` was present; the request/response path is covered by a local server test.
+The final command uses [OpenRouter's chat completions API](https://openrouter.ai/docs/quickstart) and prints the response plus reported token usage. It requires a key and network connection and supports single-turn text tasks; it does not replace a coding harness's tool loop or its subscription billing. The endpoint can be changed in TOML for a compatible local test server. Remote endpoints must use HTTPS. A live key-backed call to `google/gemini-3.5-flash-lite` returned `ROUTER_OK` with 6 input and 4 output tokens on 25 September 2026.
 
 ## TOON
 
@@ -113,13 +124,17 @@ Label task examples with the minimum acceptable tier, following `examples/evalua
 ./target/release/ai-router evaluate examples/evaluation.jsonl
 ```
 
-Record matched baseline and routed runs as JSONL with `baseline_compute`, `routed_compute`, `baseline_success`, and `routed_success`, following `examples/measurements.jsonl`. Use the same compute unit for both runs: API spend, billable token equivalent, or subscription quota consumption. Include retries and router overhead in routed compute.
+Record matched baseline and routed runs as JSONL with `baseline_compute`, `routed_compute`, `baseline_success`, and `routed_success`, following `examples/measurements.jsonl`. Use the same compute unit for both runs: API spend, billable token equivalent, or subscription quota consumption. Include lead planning, sidekick execution, all review and correction rounds, retries, and router overhead in Fusion compute. Test on isolated copies or worktrees of the same starting commit with the same tasks, acceptance checks, and time window. Compare completed tasks at quality parity; split tasks by size and difficulty, report p50/p95 cost and latency, and track unsuccessful runs separately. A single development task is a smoke test, not evidence of a 50% gain.
 
 ```sh
 ./target/release/ai-router savings examples/measurements.jsonl
 ```
 
 `savings` computes `1 - routed_compute / baseline_compute`; it marks the 50% target met only if regain is at least 0.5 and routed failures do not exceed baseline failures. The checked-in file is an illustration, not evidence of project savings. A representative shadow and live comparison remains necessary before claiming 50% in production.
+
+### Measured Fusion smoke test
+
+On 25 September 2026, the same one-line README edit passed in two fresh Git fixtures. A single Grok 4.7 agent reported $0.02316556 equivalent cost and finished in about 11 seconds. Grok 4.7 as lead plus Claude Haiku as sidekick reported $0.07125830 combined equivalent cost and finished in about 45 seconds. Fusion cost **3.08× more** on this tiny task; the 50% target was not met. These are provider-reported CLI cost figures, not an invoice or a representative workload. The sample is recorded in `examples/fusion-smoke-measurement.jsonl` and can be checked with `ai-router savings examples/fusion-smoke-measurement.jsonl`. This result argues for keeping simple tasks on one agent and evaluating Fusion on larger tasks where implementation, retries, and review dominate cost.
 
 ## Limits
 

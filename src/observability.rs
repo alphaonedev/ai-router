@@ -1,3 +1,4 @@
+use crate::fusion::FusionEvent;
 use ai_router::{read_events, savings, Measurement, RouterEvent, Tier};
 use std::{
     collections::BTreeMap,
@@ -10,6 +11,7 @@ use std::{
 
 struct Snapshot {
     events: Vec<RouterEvent>,
+    fusion_events: Vec<FusionEvent>,
     model_counts: Vec<(String, usize)>,
     source_counts: Vec<(String, usize)>,
     tier_counts: [usize; 3],
@@ -37,6 +39,14 @@ fn snapshot(cache_dir: &Path, measurements_path: Option<&Path>) -> Snapshot {
         .unwrap_or_default()
         .as_secs();
     events.retain(|e| e.timestamp <= now && now - e.timestamp < 86_400);
+    let mut fusion_events: Vec<FusionEvent> =
+        fs::read_to_string(cache_dir.join("fusion-events.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .filter(|e: &FusionEvent| e.timestamp <= now && now - e.timestamp < 86_400)
+            .collect();
+    fusion_events.sort_by_key(|e| e.timestamp);
     events.sort_by_key(|e| e.timestamp);
     let mut models = BTreeMap::new();
     let mut sources = BTreeMap::new();
@@ -75,6 +85,7 @@ fn snapshot(cache_dir: &Path, measurements_path: Option<&Path>) -> Snapshot {
         measurements(measurements_path).map_or((None, None), |(r, t)| (Some(r), Some(t)));
     Snapshot {
         events,
+        fusion_events,
         model_counts,
         source_counts,
         tier_counts: tiers,
@@ -144,8 +155,15 @@ fn render(s: &Snapshot) -> String {
         Some(false) => "Target not met or quality below baseline",
         None => "Add a measurements file to assess the 50% target",
     };
+    let mut fusion_feed = String::new();
+    for e in s.fusion_events.iter().rev().take(12) {
+        fusion_feed.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td class='mono'>{}</td><td class='mono'>{}</td><td class='mono dim'>{}</td></tr>", esc(&e.stage), esc(&e.client), esc(&e.model), esc(&e.status), e.input_tokens.map_or("—".into(), |n| n.to_string()), e.output_tokens.map_or("—".into(), |n| n.to_string()), ago(e.timestamp)));
+    }
+    if fusion_feed.is_empty() {
+        fusion_feed = "<tr><td colspan='7' class='empty'>No Fusion runs yet.</td></tr>".into();
+    }
     format!(
-        r##"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="2"><meta name="color-scheme" content="dark"><title>ai-router / live observatory</title><style>{CSS}</style></head><body><div class="shell"><header><div class="brand"><div class="logo">A<span>↗</span></div><div><strong>ai-router</strong><small>LIVE OBSERVATORY</small></div></div><div class="status"><span class="beacon"></span> LOCAL STREAM <span class="divider">/</span> 24H WINDOW <span class="divider">/</span> 2S REFRESH</div></header><main><section class="hero"><div><div class="eyebrow"><span class="pulse"></span> ROUTING INTELLIGENCE · RUST ENGINE</div><h1>Every decision,<br><em>in view.</em></h1><p>See how tasks flow through local policy, cache, PAW, and Jev. Prompt text stays out of this view and the event log.</p></div><div class="orb" role="img" aria-label="Three orbiting model tiers"><div class="ring ring1"></div><div class="ring ring2"></div><div class="ring ring3"></div><div class="orbcore"><span>{total}</span><small>DECISIONS</small></div><i class="spark spark1"></i><i class="spark spark2"></i><i class="spark spark3"></i></div></section><section class="metrics" aria-label="Routing metrics"><div class="metric"><span class="metric-label">DECISIONS · 24H</span><strong>{total}</strong><small>Local routing events</small></div><div class="metric"><span class="metric-label">CACHE REUSE</span><strong>{:.0}<sup>%</sup></strong><small>Decisions served from cache</small></div><div class="metric"><span class="metric-label">DECISION P50</span><strong>{}<sup>ms</sup></strong><small>Observed local latency</small></div><div class="metric"><span class="metric-label">DECISION P95</span><strong>{}<sup>ms</sup></strong><small>Tail latency</small></div><div class="metric featured"><span class="metric-label">COMPUTE REGAIN</span><strong>{}</strong><small>{}</small></div></section><section class="charts"><article class="panel"><div class="panelhead"><div><span class="overline">01 / ALLOCATION</span><h2>Model mix</h2></div><span class="glyph">◈</span></div>{}</article><article class="panel"><div class="panelhead"><div><span class="overline">02 / DECISION SOURCE</span><h2>Router path</h2></div><span class="glyph">⌁</span></div>{}</article><article class="panel"><div class="panelhead"><div><span class="overline">03 / CAPABILITY</span><h2>Tier distribution</h2></div><span class="glyph">◇</span></div>{}</article></section><section class="pipeline"><div class="panelhead"><div><span class="overline">DECISION PIPELINE</span><h2>From task to model</h2></div></div><div class="steps"><div><b>01</b><strong>Explicit</strong><small>Caller choice</small></div><span>→</span><div><b>02</b><strong>Cache</strong><small>Equivalent task</small></div><span>→</span><div><b>03</b><strong>Rules</strong><small>Local policy</small></div><span>→</span><div><b>04</b><strong>PAW / System One / Jev</strong><small>Optional signal</small></div><span>→</span><div><b>05</b><strong>Harness</strong><small>Claude · Codex · Grok</small></div></div></section><section class="feed"><div class="panelhead"><div><span class="overline">MOST RECENT</span><h2>Decision stream</h2></div><span class="live"><span class="beacon"></span> LIVE</span></div><div class="tablewrap"><table><thead><tr><th>HARNESS</th><th>MODEL</th><th>TIER</th><th>SOURCE</th><th>LATENCY</th><th>WHEN</th></tr></thead><tbody>{feed}</tbody></table></div></section></main><footer><span>ai-router · localhost only · no task text logged</span><span>Rust-powered routing observability</span></footer></div></body></html>"##,
+        r##"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="2"><meta name="color-scheme" content="dark"><title>ai-router / live observatory</title><style>{CSS}</style></head><body><div class="shell"><header><div class="brand"><div class="logo">A<span>↗</span></div><div><strong>ai-router</strong><small>LIVE OBSERVATORY</small></div></div><div class="status"><span class="beacon"></span> LOCAL STREAM <span class="divider">/</span> 24H WINDOW <span class="divider">/</span> 2S REFRESH</div></header><main><section class="hero"><div><div class="eyebrow"><span class="pulse"></span> ROUTING INTELLIGENCE · RUST ENGINE</div><h1>Every decision,<br><em>in view.</em></h1><p>See how tasks flow through local policy, cache, PAW, System One, Jev, and Fusion. Prompt text stays out of this view and the event log.</p></div><div class="orb" role="img" aria-label="Three orbiting model tiers"><div class="ring ring1"></div><div class="ring ring2"></div><div class="ring ring3"></div><div class="orbcore"><span>{total}</span><small>DECISIONS</small></div><i class="spark spark1"></i><i class="spark spark2"></i><i class="spark spark3"></i></div></section><section class="metrics" aria-label="Routing metrics"><div class="metric"><span class="metric-label">DECISIONS · 24H</span><strong>{total}</strong><small>Local routing events</small></div><div class="metric"><span class="metric-label">CACHE REUSE</span><strong>{:.0}<sup>%</sup></strong><small>Decisions served from cache</small></div><div class="metric"><span class="metric-label">DECISION P50</span><strong>{}<sup>ms</sup></strong><small>Observed local latency</small></div><div class="metric"><span class="metric-label">DECISION P95</span><strong>{}<sup>ms</sup></strong><small>Tail latency</small></div><div class="metric featured"><span class="metric-label">COMPUTE REGAIN</span><strong>{}</strong><small>{}</small></div></section><section class="charts"><article class="panel"><div class="panelhead"><div><span class="overline">01 / ALLOCATION</span><h2>Model mix</h2></div><span class="glyph">◈</span></div>{}</article><article class="panel"><div class="panelhead"><div><span class="overline">02 / DECISION SOURCE</span><h2>Router path</h2></div><span class="glyph">⌁</span></div>{}</article><article class="panel"><div class="panelhead"><div><span class="overline">03 / CAPABILITY</span><h2>Tier distribution</h2></div><span class="glyph">◇</span></div>{}</article></section><section class="pipeline"><div class="panelhead"><div><span class="overline">DECISION PIPELINE</span><h2>From task to model</h2></div></div><div class="steps"><div><b>01</b><strong>Explicit</strong><small>Caller choice</small></div><span>→</span><div><b>02</b><strong>Cache</strong><small>Equivalent task</small></div><span>→</span><div><b>03</b><strong>Rules</strong><small>Local policy</small></div><span>→</span><div><b>04</b><strong>PAW / System One / Jev</strong><small>Optional signal</small></div><span>→</span><div><b>05</b><strong>Harness</strong><small>Claude · Codex · Grok</small></div></div></section><section class="feed"><div class="panelhead"><div><span class="overline">FUSION WORKFLOW</span><h2>Lead and sidekick</h2></div><span class="live"><span class="beacon"></span> LIVE</span></div><div class="tablewrap"><table><thead><tr><th>STAGE</th><th>HARNESS</th><th>MODEL</th><th>STATUS</th><th>INPUT</th><th>OUTPUT</th><th>WHEN</th></tr></thead><tbody>{fusion_feed}</tbody></table></div></section><section class="feed"><div class="panelhead"><div><span class="overline">MOST RECENT</span><h2>Decision stream</h2></div><span class="live"><span class="beacon"></span> LIVE</span></div><div class="tablewrap"><table><thead><tr><th>HARNESS</th><th>MODEL</th><th>TIER</th><th>SOURCE</th><th>LATENCY</th><th>WHEN</th></tr></thead><tbody>{feed}</tbody></table></div></section></main><footer><span>ai-router · localhost only · no task text logged</span><span>Rust-powered routing observability</span></footer></div></body></html>"##,
         s.cache_rate * 100.0,
         s.p50,
         s.p95,
@@ -215,6 +233,22 @@ fn terminal(s: &Snapshot) -> String {
     if s.events.is_empty() {
         out.push_str("  Waiting for routed tasks...\n")
     };
+    out.push_str("\nFUSION PHASES\n");
+    for e in s.fusion_events.iter().rev().take(8) {
+        out.push_str(&format!(
+            "  {:<16} {:<8} {:<22} {:<9} in {:>6} out {:>6}  {}\n",
+            e.stage,
+            e.client,
+            e.model,
+            e.status,
+            e.input_tokens.map_or("—".into(), |n| n.to_string()),
+            e.output_tokens.map_or("—".into(), |n| n.to_string()),
+            ago(e.timestamp)
+        ));
+    }
+    if s.fusion_events.is_empty() {
+        out.push_str("  Waiting for Fusion runs...\n");
+    }
     out.push_str("\nPress Ctrl-C to stop. Prompt text is never logged.\n");
     out
 }

@@ -39,6 +39,38 @@ fn launch_plans_cover_three_harnesses() {
 }
 
 #[test]
+fn fusion_dry_run_loads_workflow_and_roles_from_config() {
+    let binary = env!("CARGO_BIN_EXE_ai-router");
+    let config = concat!(env!("CARGO_MANIFEST_DIR"), "/router.toml");
+    let output = Command::new(binary)
+        .args([
+            "--config",
+            config,
+            "fusion",
+            "--task",
+            "Add tests for the parser",
+            "--dry-run",
+        ])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        plan["workflow"],
+        "lead brief -> sidekick implementation -> validation -> lead review -> optional correction"
+    );
+    assert_eq!(plan["lead"]["client"], "codex");
+    assert_eq!(plan["lead"]["model"], "gpt-6-astra");
+    assert_eq!(plan["sidekick"]["client"], "codex");
+    assert_eq!(plan["sidekick"]["model"], "gpt-5.6-sol");
+}
+
+#[test]
 fn route_json_is_stdin_stdout_protocol() {
     let binary = env!("CARGO_BIN_EXE_ai-router");
     let config = concat!(env!("CARGO_MANIFEST_DIR"), "/router.toml");
