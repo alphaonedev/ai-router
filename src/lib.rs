@@ -40,7 +40,7 @@ pub struct Config {
     #[serde(default)]
     pub openrouter: OpenRouterConfig,
     #[serde(default)]
-    pub fusion: FusionConfig,
+    pub relay: RelayConfig,
     #[serde(default)]
     pub patch: PatchConfig,
 }
@@ -80,67 +80,67 @@ impl Default for PatchConfig {
 }
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct FusionRole {
+pub struct RelayRole {
     pub client: String,
     pub model: String,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct FusionConfig {
+pub struct RelayConfig {
     #[serde(default)]
     pub enabled: bool,
-    pub lead: FusionRole,
-    pub sidekick: FusionRole,
+    pub lead: RelayRole,
+    pub sidekick: RelayRole,
     #[serde(default)]
-    pub routine: Option<FusionRole>,
-    #[serde(default = "default_fusion_corrections")]
+    pub routine: Option<RelayRole>,
+    #[serde(default = "default_relay_corrections")]
     pub max_corrections: u8,
-    #[serde(default = "default_fusion_chars")]
+    #[serde(default = "default_relay_chars")]
     pub max_handoff_chars: usize,
-    #[serde(default = "default_fusion_timeout")]
+    #[serde(default = "default_relay_timeout")]
     pub timeout_secs: u64,
     #[serde(default)]
-    pub validation: Vec<FusionValidation>,
-    #[serde(default = "default_fusion_min_tier")]
+    pub validation: Vec<RelayValidation>,
+    #[serde(default = "default_relay_min_tier")]
     pub min_tier: Tier,
 }
-fn default_fusion_min_tier() -> Tier {
+fn default_relay_min_tier() -> Tier {
     Tier::Deep
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct FusionValidation {
+pub struct RelayValidation {
     pub program: String,
     #[serde(default)]
     pub args: Vec<String>,
 }
-fn default_fusion_corrections() -> u8 {
+fn default_relay_corrections() -> u8 {
     1
 }
-fn default_fusion_chars() -> usize {
+fn default_relay_chars() -> usize {
     6000
 }
-fn default_fusion_timeout() -> u64 {
+fn default_relay_timeout() -> u64 {
     900
 }
-impl Default for FusionConfig {
+impl Default for RelayConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            lead: FusionRole {
+            lead: RelayRole {
                 client: "codex".into(),
                 model: "gpt-6-astra".into(),
             },
-            sidekick: FusionRole {
+            sidekick: RelayRole {
                 client: "codex".into(),
                 model: "gpt-5.6-sol".into(),
             },
             routine: None,
-            max_corrections: default_fusion_corrections(),
-            max_handoff_chars: default_fusion_chars(),
-            timeout_secs: default_fusion_timeout(),
+            max_corrections: default_relay_corrections(),
+            max_handoff_chars: default_relay_chars(),
+            timeout_secs: default_relay_timeout(),
             validation: Vec::new(),
-            min_tier: default_fusion_min_tier(),
+            min_tier: default_relay_min_tier(),
         }
     }
 }

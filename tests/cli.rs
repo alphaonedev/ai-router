@@ -63,14 +63,14 @@ fn passthrough_cannot_override_routed_model_or_effort() {
 }
 
 #[test]
-fn fusion_dry_run_loads_workflow_and_roles_from_config() {
+fn relay_dry_run_loads_workflow_and_roles_from_config() {
     let binary = env!("CARGO_BIN_EXE_ai-router");
     let config = concat!(env!("CARGO_MANIFEST_DIR"), "/router.toml");
     let output = Command::new(binary)
         .args([
             "--config",
             config,
-            "fusion",
+            "relay",
             "--task",
             "Add tests for the parser",
             "--dry-run",

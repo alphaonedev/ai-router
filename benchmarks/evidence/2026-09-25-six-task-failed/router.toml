@@ -99,21 +99,21 @@ min_margin = 0.2
 base_url = "https://openrouter.ai/api/v1"
 api_key_env = "OPENROUTER_API_KEY"
 
-[fusion]
+[relay]
 max_corrections = 1
 max_handoff_chars = 6000
 timeout_secs = 900
 min_tier = "deep"
 
-[fusion.lead]
+[relay.lead]
 client = "grok"
 model = "grok-4.7"
 
-[fusion.sidekick]
+[relay.sidekick]
 client = "grok"
 model = "grok-4.7-build-fast"
 
-[[fusion.validation]]
+[[relay.validation]]
 program = "cargo"
 args = [
     "test",

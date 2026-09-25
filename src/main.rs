@@ -8,9 +8,9 @@ use std::{
     path::PathBuf,
     process::Command,
 };
-mod fusion;
 mod observability;
 mod patch;
+mod relay;
 #[derive(Parser)]
 #[command(
     name = "ai-router",
@@ -27,7 +27,7 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Action {
-    /// Select one validated sidekick or the full Fusion workflow for a new task.
+    /// Select one validated sidekick or the full Relay workflow for a new task.
     Adaptive {
         #[arg(long)]
         task: String,
@@ -45,7 +45,7 @@ enum Action {
         file: Vec<PathBuf>,
     },
     /// Run a persistent lead and sidekick workflow from TOML roles.
-    Fusion {
+    Relay {
         #[arg(long)]
         task: String,
         #[arg(long, default_value = ".")]
@@ -245,7 +245,7 @@ fn main() -> Result<(), String> {
         } => {
             let cfg = load_config(&cli.config)?;
             let req = Request {
-                client: cfg.fusion.lead.client.clone(),
+                client: cfg.relay.lead.client.clone(),
                 task: task.clone(),
                 model: None,
                 min_tier: tier(min_tier.clone())?,
@@ -256,10 +256,10 @@ fn main() -> Result<(), String> {
             if *dry_run {
                 println!(
                     "{}",
-                    serde_json::json!({"routing":decision,"execution":fusion::adaptive_plan(&cfg, workdir, decision.tier)?,"patch_files":file})
+                    serde_json::json!({"routing":decision,"execution":relay::adaptive_plan(&cfg, workdir, decision.tier)?,"patch_files":file})
                 );
             } else {
-                let report = fusion::adaptive(
+                let report = relay::adaptive(
                     &cfg,
                     task,
                     workdir,
@@ -281,27 +281,27 @@ fn main() -> Result<(), String> {
             }
             Ok(())
         }
-        Action::Fusion {
+        Action::Relay {
             task,
             workdir,
             dry_run,
         } => {
             let cfg = load_config(&cli.config)?;
-            if !cfg.fusion.enabled {
+            if !cfg.relay.enabled {
                 return Err(
-                    "fusion is disabled in TOML; set [fusion].enabled = true to use it".into(),
+                    "relay is disabled in TOML; set [relay].enabled = true to use it".into(),
                 );
             }
             if *dry_run {
-                println!("{}", fusion::dry_plan(&cfg, workdir)?);
+                println!("{}", relay::dry_plan(&cfg, workdir)?);
             } else {
-                let report = fusion::run(&cfg, task, workdir, cache(&cli).as_deref())?;
+                let report = relay::run(&cfg, task, workdir, cache(&cli).as_deref())?;
                 println!(
                     "{}",
                     serde_json::to_string(&report).map_err(|e| e.to_string())?
                 );
                 if report.outcome != "accepted" {
-                    return Err("fusion ended without lead acceptance".into());
+                    return Err("relay ended without lead acceptance".into());
                 }
             }
             Ok(())

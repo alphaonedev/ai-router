@@ -1,1 +1,0 @@
-{"task":"append one README line in matched Git fixtures","unit":"provider_reported_usd_equivalent","baseline_compute":0.02316556,"routed_compute":0.07125830,"baseline_success":true,"routed_success":true,"baseline_model":"grok-4.7/high","fusion_pair":"grok-4.7/high + claude/haiku/low","baseline_duration_ms":11052,"fusion_duration_ms":44846,"date":"2026-09-25"}

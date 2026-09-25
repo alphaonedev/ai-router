@@ -1,4 +1,4 @@
-use ai_router::{load_config, savings, FusionRole, FusionValidation, Measurement};
+use ai_router::{load_config, savings, Measurement, RelayRole, RelayValidation};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -217,15 +217,15 @@ fn main() -> Result<(), String> {
     cfg.patch.enabled = true;
     cfg.patch.model = manifest.patch_model.clone();
     cfg.patch.max_file_bytes = 100_000;
-    cfg.fusion.lead = FusionRole {
+    cfg.relay.lead = RelayRole {
         client: cli.baseline_client.clone(),
         model: baseline_model.into(),
     };
-    cfg.fusion.sidekick = FusionRole {
+    cfg.relay.sidekick = RelayRole {
         client: "claude".into(),
         model: "haiku".into(),
     };
-    cfg.fusion.validation = vec![FusionValidation {
+    cfg.relay.validation = vec![RelayValidation {
         program: "cargo".into(),
         args: vec!["test".into(), "-q".into()],
     }];

@@ -1,10 +1,10 @@
 # Security and review notes
 
-The router executes locally with the user's permissions. `run` launches an installed coding CLI; `adaptive` and `fusion` let those CLIs edit the selected worktree and run the TOML validation commands. The optional exact-edit path sends the task and selected file contents to the configured OpenRouter endpoint. The local dashboard binds to `127.0.0.1` and omits task text from its event log.
+The router executes locally with the user's permissions. `run` launches an installed coding CLI; `adaptive` and `relay` let those CLIs edit the selected worktree and run the TOML validation commands. The optional exact-edit path sends the task and selected file contents to the configured OpenRouter endpoint. The local dashboard binds to `127.0.0.1` and omits task text from its event log.
 
 ## Review on 25 September 2026
 
-The Rust source and CLI tests were traced with CodeGraph and reviewed across routing, cache, HTTP adapters, patching, Fusion, observability, and the benchmark runner. `cargo test`, `cargo clippy --all-targets -- -D warnings`, and `cargo check --features paw` passed after the fixes.
+The Rust source and CLI tests were traced with CodeGraph and reviewed across routing, cache, HTTP adapters, patching, Relay, observability, and the benchmark runner. `cargo test`, `cargo clippy --all-targets -- -D warnings`, and `cargo check --features paw` passed after the fixes.
 
 | Area | Finding and resolution |
 | --- | --- |
@@ -16,7 +16,7 @@ The Rust source and CLI tests were traced with CodeGraph and reviewed across rou
 | Exact edits | A model response could overwrite a file changed during the request. The file is checked again before replacement, and symlink targets are rejected at write time. |
 | Exact-match ambiguity | Overlapping occurrences of `old` could be mistaken for one match. These are now rejected before an edit is applied. |
 | Validation failure | An error starting or running validation could leave exact edits in place. Applied edits are now rolled back before returning that error. |
-| Fusion validation | A lead could accept when no validation commands were configured. Fusion execution now requires at least one validation command. |
+| Relay validation | A lead could accept when no validation commands were configured. Relay execution now requires at least one validation command. |
 | CLI pass-through | Additional CLI arguments could override the routed model or effort through configuration flags. Those flags are rejected. |
 | Terminal observability | Control characters in event labels could affect the terminal display. The watch view now strips them. |
 | Benchmark fixtures | A custom manifest could point mutation paths outside its cloned fixture. File paths and task IDs are now constrained before any mutation. |

@@ -1,5 +1,5 @@
 use crate::patch::{self, PatchAttempt};
-use ai_router::{Config, FusionRole, Model, Tier};
+use ai_router::{Config, Model, RelayRole, Tier};
 use serde::Serialize;
 use serde_json::Value;
 use std::{
@@ -48,7 +48,7 @@ pub struct AdaptiveReport {
     pub classification_tier: Tier,
     pub phases: Vec<Phase>,
     pub validation: Vec<ValidationResult>,
-    pub fusion: Option<Report>,
+    pub relay: Option<Report>,
     pub patch: Option<PatchAttempt>,
     pub patch_attempts: Vec<PatchAttempt>,
     pub patch_validation: Vec<ValidationResult>,
@@ -64,7 +64,7 @@ pub struct ValidationResult {
     pub output_tail: String,
 }
 #[derive(Serialize, serde::Deserialize)]
-pub struct FusionEvent {
+pub struct RelayEvent {
     pub timestamp: u64,
     pub run_id: String,
     pub stage: String,
@@ -83,14 +83,14 @@ fn event(
     run_id: &str,
     stage: &str,
     status: &str,
-    role: &FusionRole,
+    role: &RelayRole,
     phase: Option<&Phase>,
 ) {
     let Some(dir) = cache else { return };
     if fs::create_dir_all(dir).is_err() {
         return;
     }
-    let item = FusionEvent {
+    let item = RelayEvent {
         timestamp: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -107,9 +107,9 @@ fn event(
         cache_write_tokens: phase.and_then(|p| p.cache_write_tokens),
         cost_usd: phase.and_then(|p| p.cost_usd),
     };
-    let path = dir.join("fusion-events.jsonl");
+    let path = dir.join("relay-events.jsonl");
     if fs::metadata(&path).is_ok_and(|m| m.len() > 5 * 1024 * 1024) {
-        let _ = fs::rename(&path, dir.join("fusion-events.1.jsonl"));
+        let _ = fs::rename(&path, dir.join("relay-events.1.jsonl"));
     }
     if let (Ok(mut file), Ok(line)) = (
         OpenOptions::new().create(true).append(true).open(path),
@@ -143,7 +143,7 @@ struct PhaseRequest<'a> {
 }
 fn tracked_phase(
     cfg: &Config,
-    role: &FusionRole,
+    role: &RelayRole,
     req: PhaseRequest<'_>,
     cache: Option<&Path>,
     run_id: &str,
@@ -168,23 +168,23 @@ fn tracked_phase(
     }
 }
 
-fn model<'a>(cfg: &'a Config, role: &FusionRole) -> Result<&'a Model, String> {
+fn model<'a>(cfg: &'a Config, role: &RelayRole) -> Result<&'a Model, String> {
     if !["claude", "codex", "grok"].contains(&role.client.as_str()) {
-        return Err(format!("unsupported fusion client: {}", role.client));
+        return Err(format!("unsupported relay client: {}", role.client));
     }
     cfg.models
         .get(&role.client)
         .and_then(|ms| ms.iter().find(|m| m.id == role.model))
         .ok_or_else(|| {
             format!(
-                "fusion model {} is not allowed for {}",
+                "relay model {} is not allowed for {}",
                 role.model, role.client
             )
         })
 }
 
 fn command(
-    role: &FusionRole,
+    role: &RelayRole,
     m: &Model,
     prompt: &str,
     session: &str,
@@ -339,7 +339,7 @@ fn parse_output(
     })
 }
 
-fn run_phase(cfg: &Config, role: &FusionRole, req: PhaseRequest<'_>) -> Result<ResultText, String> {
+fn run_phase(cfg: &Config, role: &RelayRole, req: PhaseRequest<'_>) -> Result<ResultText, String> {
     let m = model(cfg, role)?;
     let mut cmd = command(role, m, req.prompt, req.session, req.resume, req.readonly);
     let mut stdout = tempfile::tempfile().map_err(|e| e.to_string())?;
@@ -355,12 +355,12 @@ fn run_phase(cfg: &Config, role: &FusionRole, req: PhaseRequest<'_>) -> Result<R
         if let Some(s) = child.try_wait().map_err(|e| e.to_string())? {
             break s;
         }
-        if start.elapsed() > Duration::from_secs(cfg.fusion.timeout_secs) {
+        if start.elapsed() > Duration::from_secs(cfg.relay.timeout_secs) {
             let _ = child.kill();
             let _ = child.wait();
             return Err(format!(
                 "{} timed out after {} seconds",
-                req.label, cfg.fusion.timeout_secs
+                req.label, cfg.relay.timeout_secs
             ));
         }
         thread::sleep(Duration::from_millis(100));
@@ -438,7 +438,7 @@ fn snapshot(cwd: &Path, destination: &Path) -> Result<(), String> {
     let mut total = 0u64;
     for raw in files.split(|b| *b == 0).filter(|s| !s.is_empty()) {
         let name = std::str::from_utf8(raw)
-            .map_err(|_| "non-UTF8 repository path unsupported in Fusion snapshot")?;
+            .map_err(|_| "non-UTF8 repository path unsupported in Relay snapshot")?;
         let rel = Path::new(name);
         if rel.is_absolute()
             || rel
@@ -466,14 +466,14 @@ fn snapshot(cwd: &Path, destination: &Path) -> Result<(), String> {
             Err(e) => return Err(e.to_string()),
         };
         if meta.file_type().is_symlink() {
-            return Err(format!("Fusion snapshot does not support symlink: {name}"));
+            return Err(format!("Relay snapshot does not support symlink: {name}"));
         }
         if !meta.is_file() {
             continue;
         }
         total = total.saturating_add(meta.len());
         if total > 256 * 1024 * 1024 {
-            return Err("Fusion snapshot exceeds 256 MiB".into());
+            return Err("Relay snapshot exceeds 256 MiB".into());
         }
         let target = destination.join(rel);
         if let Some(parent) = target.parent() {
@@ -518,9 +518,9 @@ fn review_decision(text: &str) -> Result<bool, String> {
 }
 fn validate(cfg: &Config, cwd: &Path) -> Result<Vec<ValidationResult>, String> {
     let mut results = Vec::new();
-    for check in &cfg.fusion.validation {
+    for check in &cfg.relay.validation {
         if check.program.trim().is_empty() {
-            return Err("fusion validation program is empty".into());
+            return Err("relay validation program is empty".into());
         }
         let mut output = tempfile::tempfile().map_err(|e| e.to_string())?;
         let error = output.try_clone().map_err(|e| e.to_string())?;
@@ -537,7 +537,7 @@ fn validate(cfg: &Config, cwd: &Path) -> Result<Vec<ValidationResult>, String> {
             if let Some(s) = child.try_wait().map_err(|e| e.to_string())? {
                 break s;
             }
-            if start.elapsed() > Duration::from_secs(cfg.fusion.timeout_secs) {
+            if start.elapsed() > Duration::from_secs(cfg.relay.timeout_secs) {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(format!("validation {} timed out", check.program));
@@ -567,13 +567,13 @@ fn validate(cfg: &Config, cwd: &Path) -> Result<Vec<ValidationResult>, String> {
 }
 
 pub fn dry_plan(cfg: &Config, cwd: &Path) -> Result<Value, String> {
-    model(cfg, &cfg.fusion.lead)?;
-    model(cfg, &cfg.fusion.sidekick)?;
+    model(cfg, &cfg.relay.lead)?;
+    model(cfg, &cfg.relay.sidekick)?;
     if !cwd.is_dir() {
         return Err("workdir is not a directory".into());
     }
     Ok(
-        serde_json::json!({"workflow":"lead brief -> sidekick implementation -> validation -> lead review -> optional correction", "lead":cfg.fusion.lead,"sidekick":cfg.fusion.sidekick,"max_corrections":cfg.fusion.max_corrections,"max_handoff_chars":cfg.fusion.max_handoff_chars,"timeout_secs_per_phase":cfg.fusion.timeout_secs,"validation":cfg.fusion.validation,"workdir":cwd}),
+        serde_json::json!({"workflow":"lead brief -> sidekick implementation -> validation -> lead review -> optional correction", "lead":cfg.relay.lead,"sidekick":cfg.relay.sidekick,"max_corrections":cfg.relay.max_corrections,"max_handoff_chars":cfg.relay.max_handoff_chars,"timeout_secs_per_phase":cfg.relay.timeout_secs,"validation":cfg.relay.validation,"workdir":cwd}),
     )
 }
 
@@ -582,20 +582,20 @@ pub fn adaptive_plan(cfg: &Config, cwd: &Path, tier: Tier) -> Result<Value, Stri
     if !(1..=3).contains(&cfg.patch.max_attempts) {
         return Err("patch max_attempts must be 1..3".into());
     }
-    let routine = cfg.fusion.routine.as_ref().unwrap_or(&cfg.fusion.sidekick);
+    let routine = cfg.relay.routine.as_ref().unwrap_or(&cfg.relay.sidekick);
     model(cfg, routine)?;
-    if (!cfg.fusion.enabled || tier < cfg.fusion.min_tier) && cfg.fusion.validation.is_empty() {
+    if (!cfg.relay.enabled || tier < cfg.relay.min_tier) && cfg.relay.validation.is_empty() {
         return Err(
-            "adaptive single-agent path requires at least one fusion.validation command".into(),
+            "adaptive single-agent path requires at least one relay.validation command".into(),
         );
     }
-    let mode = if cfg.fusion.enabled && tier >= cfg.fusion.min_tier {
-        "fusion"
+    let mode = if cfg.relay.enabled && tier >= cfg.relay.min_tier {
+        "relay"
     } else {
         "single_sidekick"
     };
     Ok(
-        serde_json::json!({"mode":mode,"classification_tier":tier,"fusion_enabled":cfg.fusion.enabled,"fusion_min_tier":cfg.fusion.min_tier,"lead":cfg.fusion.lead,"sidekick":cfg.fusion.sidekick,"routine":routine,"validation":cfg.fusion.validation,"workdir":cwd}),
+        serde_json::json!({"mode":mode,"classification_tier":tier,"relay_enabled":cfg.relay.enabled,"relay_min_tier":cfg.relay.min_tier,"lead":cfg.relay.lead,"sidekick":cfg.relay.sidekick,"routine":routine,"validation":cfg.relay.validation,"workdir":cwd}),
     )
 }
 
@@ -614,18 +614,18 @@ pub fn adaptive(
     }
     let start = Instant::now();
     let run_id = uuid::Uuid::new_v4().to_string();
-    if cfg.fusion.enabled && tier >= cfg.fusion.min_tier {
+    if cfg.relay.enabled && tier >= cfg.relay.min_tier {
         let report = run(cfg, task, cwd, cache)?;
         return Ok(AdaptiveReport {
             run_id,
-            mode: "fusion".into(),
+            mode: "relay".into(),
             outcome: report.outcome.clone(),
             classification_tier: tier,
             total_cost_usd: report.total_cost_usd,
             duration_ms: start.elapsed().as_millis(),
             phases: Vec::new(),
             validation: Vec::new(),
-            fusion: Some(report),
+            relay: Some(report),
             patch: None,
             patch_attempts: Vec::new(),
             patch_validation: Vec::new(),
@@ -674,7 +674,7 @@ pub fn adaptive(
                 match patch::attempt(cfg, patch_model, &patch_task, cwd, file) {
                     Ok((attempt, patch)) => {
                         patch_cost = patch_cost.zip(attempt.cost_usd).map(|(a, b)| a + b);
-                        let patch_role = FusionRole {
+                        let patch_role = RelayRole {
                             client: "openrouter".into(),
                             model: attempt.model.clone(),
                         };
@@ -719,7 +719,7 @@ pub fn adaptive(
                     }
                 };
                 if patch_validation.iter().all(|v| v.success) {
-                    let patch_role = FusionRole {
+                    let patch_role = RelayRole {
                         client: "openrouter".into(),
                         model: patch_model.into(),
                     };
@@ -732,14 +732,14 @@ pub fn adaptive(
                         phases: Vec::new(),
                         validation: patch_validation,
                         patch_validation: Vec::new(),
-                        fusion: None,
+                        relay: None,
                         total_cost_usd: patch_cost,
                         duration_ms: start.elapsed().as_millis(),
                         patch: patch_record,
                         patch_attempts,
                     });
                 }
-                let patch_role = FusionRole {
+                let patch_role = RelayRole {
                     client: "openrouter".into(),
                     model: patch_model.into(),
                 };
@@ -769,7 +769,7 @@ pub fn adaptive(
     }
     let session = uuid::Uuid::new_v4().to_string();
     let prompt = format!("Implement this task in the current repository. Inspect files as needed, run relevant checks, and report the change and any unresolved issue. Do not commit or push.\n\nTask:\n{task}");
-    let routine = cfg.fusion.routine.as_ref().unwrap_or(&cfg.fusion.sidekick);
+    let routine = cfg.relay.routine.as_ref().unwrap_or(&cfg.relay.sidekick);
     eprintln!(
         "adaptive: single sidekick {} / {}",
         routine.client, routine.model
@@ -790,7 +790,7 @@ pub fn adaptive(
     )?;
     let validation = validate(cfg, cwd)?;
     let passed = validation.iter().all(|v| v.success);
-    let local_role = FusionRole {
+    let local_role = RelayRole {
         client: "local".into(),
         model: "validation".into(),
     };
@@ -817,7 +817,7 @@ pub fn adaptive(
             classification_tier: tier,
             phases: vec![work.phase],
             validation,
-            fusion: None,
+            relay: None,
             total_cost_usd: total_cost,
             duration_ms: start.elapsed().as_millis(),
             patch: patch_record,
@@ -825,7 +825,7 @@ pub fn adaptive(
             patch_validation,
         });
     }
-    if !cfg.fusion.enabled {
+    if !cfg.relay.enabled {
         event(
             cache,
             &run_id,
@@ -843,13 +843,13 @@ pub fn adaptive(
             validation,
             total_cost_usd: total_cost,
             duration_ms: start.elapsed().as_millis(),
-            fusion: None,
+            relay: None,
             patch: patch_record,
             patch_attempts,
             patch_validation,
         });
     }
-    eprintln!("adaptive: validation failed; escalating to Fusion");
+    eprintln!("adaptive: validation failed; escalating to Relay");
     let report = run(cfg, task, cwd, cache)?;
     let total_cost = total_cost.zip(report.total_cost_usd).map(|(a, b)| a + b);
     Ok(AdaptiveReport {
@@ -861,7 +861,7 @@ pub fn adaptive(
         validation,
         total_cost_usd: total_cost,
         duration_ms: start.elapsed().as_millis(),
-        fusion: Some(report),
+        relay: Some(report),
         patch: patch_record,
         patch_attempts,
         patch_validation,
@@ -870,17 +870,17 @@ pub fn adaptive(
 
 pub fn run(cfg: &Config, task: &str, cwd: &Path, cache: Option<&Path>) -> Result<Report, String> {
     dry_plan(cfg, cwd)?;
-    if cfg.fusion.validation.is_empty() {
-        return Err("fusion requires at least one validation command".into());
+    if cfg.relay.validation.is_empty() {
+        return Err("relay requires at least one validation command".into());
     }
     if task.trim().is_empty() {
         return Err("task required".into());
     }
-    if cfg.fusion.max_handoff_chars < 500 || cfg.fusion.max_handoff_chars > 100_000 {
-        return Err("fusion max_handoff_chars must be 500..100000".into());
+    if cfg.relay.max_handoff_chars < 500 || cfg.relay.max_handoff_chars > 100_000 {
+        return Err("relay max_handoff_chars must be 500..100000".into());
     }
-    if cfg.fusion.timeout_secs == 0 {
-        return Err("fusion timeout_secs must be positive".into());
+    if cfg.relay.timeout_secs == 0 {
+        return Err("relay timeout_secs must be positive".into());
     }
     let start = Instant::now();
     let lead_id = uuid::Uuid::new_v4().to_string();
@@ -889,13 +889,13 @@ pub fn run(cfg: &Config, task: &str, cwd: &Path, cache: Option<&Path>) -> Result
     let lead_workspace = tempfile::tempdir().map_err(|e| e.to_string())?;
     snapshot(cwd, lead_workspace.path())?;
     eprintln!(
-        "fusion: lead planning with {} / {}",
-        cfg.fusion.lead.client, cfg.fusion.lead.model
+        "relay: lead planning with {} / {}",
+        cfg.relay.lead.client, cfg.relay.lead.model
     );
-    let plan_prompt = format!("You are the lead agent. You are in an isolated copy of the working tree. Inspect files here and prepare a concise implementation brief for another coding agent working in the original repository. Include objective, scope, constraints, files to inspect, acceptance tests, and risks. Do not edit files. Stay under {} characters. User task:\n{}", cfg.fusion.max_handoff_chars, task);
+    let plan_prompt = format!("You are the lead agent. You are in an isolated copy of the working tree. Inspect files here and prepare a concise implementation brief for another coding agent working in the original repository. Include objective, scope, constraints, files to inspect, acceptance tests, and risks. Do not edit files. Stay under {} characters. User task:\n{}", cfg.relay.max_handoff_chars, task);
     let brief = tracked_phase(
         cfg,
-        &cfg.fusion.lead,
+        &cfg.relay.lead,
         PhaseRequest {
             label: "lead_plan",
             prompt: &plan_prompt,
@@ -914,21 +914,21 @@ pub fn run(cfg: &Config, task: &str, cwd: &Path, cache: Option<&Path>) -> Result
     let mut final_review = String::new();
     let mut outcome = "needs_review".to_string();
     let mut validation = Vec::new();
-    for round in 0..=cfg.fusion.max_corrections {
+    for round in 0..=cfg.relay.max_corrections {
         eprintln!(
-            "fusion: sidekick execution round {} with {} / {}",
+            "relay: sidekick execution round {} with {} / {}",
             round + 1,
-            cfg.fusion.sidekick.client,
-            cfg.fusion.sidekick.model
+            cfg.relay.sidekick.client,
+            cfg.relay.sidekick.model
         );
         let work_prompt = if round == 0 {
-            format!("Implement this task in the current workspace. Follow the lead's brief, inspect code as needed, run relevant tests, and report changes, tests, and unresolved issues. Do not commit or push. Keep the final report under {} characters.\n\nOriginal task:\n{}\n\nLead brief:\n{}", cfg.fusion.max_handoff_chars, task, bounded(&brief.text, cfg.fusion.max_handoff_chars))
+            format!("Implement this task in the current workspace. Follow the lead's brief, inspect code as needed, run relevant tests, and report changes, tests, and unresolved issues. Do not commit or push. Keep the final report under {} characters.\n\nOriginal task:\n{}\n\nLead brief:\n{}", cfg.relay.max_handoff_chars, task, bounded(&brief.text, cfg.relay.max_handoff_chars))
         } else {
             format!("Address the lead review feedback in this same session. Run relevant tests and report changes and unresolved issues. Do not commit or push.\n\nFeedback:\n{}", feedback)
         };
         let work = tracked_phase(
             cfg,
-            &cfg.fusion.sidekick,
+            &cfg.relay.sidekick,
             PhaseRequest {
                 label: "sidekick_work",
                 prompt: &work_prompt,
@@ -943,17 +943,17 @@ pub fn run(cfg: &Config, task: &str, cwd: &Path, cache: Option<&Path>) -> Result
         sidekick_session = work.phase.session_id.clone();
         phases.push(work.phase);
         eprintln!(
-            "fusion: running {} validation commands",
-            cfg.fusion.validation.len()
+            "relay: running {} validation commands",
+            cfg.relay.validation.len()
         );
-        let local_role = FusionRole {
+        let local_role = RelayRole {
             client: "local".into(),
             model: "validation".into(),
         };
         event(cache, &run_id, "validation", "running", &local_role, None);
         validation = validate(cfg, cwd)?;
         snapshot(cwd, lead_workspace.path())?;
-        let changes = change_summary(cwd, cfg.fusion.max_handoff_chars)?;
+        let changes = change_summary(cwd, cfg.relay.max_handoff_chars)?;
         let validation_ok = validation.iter().all(|v| v.success);
         event(
             cache,
@@ -964,11 +964,11 @@ pub fn run(cfg: &Config, task: &str, cwd: &Path, cache: Option<&Path>) -> Result
             None,
         );
         let validation_text = serde_json::to_string(&validation).map_err(|e| e.to_string())?;
-        eprintln!("fusion: lead reviewing round {}", round + 1);
-        let review_prompt = format!("Review the sidekick's changes in this isolated copy of the working tree. The coordinator copied the latest files from the original repository and supplied git status and a diff excerpt below. You may inspect copied files here. The coordinator ran validation outside your sandbox; use its results and do not rerun checks that require localhost or writes. Assess the original task and your brief, not just the sidekick report. Include exactly one DECISION: ACCEPT or DECISION: REVISE marker, then evidence and concrete fixes if revising. If uncertain or validation fails, choose REVISE.\n\nOriginal task:\n{}\n\nSidekick report:\n{}\n\nCoordinator validation:\n{}\n\nChanges:\n{}", task, bounded(&work.text, cfg.fusion.max_handoff_chars), bounded(&validation_text, cfg.fusion.max_handoff_chars), changes);
+        eprintln!("relay: lead reviewing round {}", round + 1);
+        let review_prompt = format!("Review the sidekick's changes in this isolated copy of the working tree. The coordinator copied the latest files from the original repository and supplied git status and a diff excerpt below. You may inspect copied files here. The coordinator ran validation outside your sandbox; use its results and do not rerun checks that require localhost or writes. Assess the original task and your brief, not just the sidekick report. Include exactly one DECISION: ACCEPT or DECISION: REVISE marker, then evidence and concrete fixes if revising. If uncertain or validation fails, choose REVISE.\n\nOriginal task:\n{}\n\nSidekick report:\n{}\n\nCoordinator validation:\n{}\n\nChanges:\n{}", task, bounded(&work.text, cfg.relay.max_handoff_chars), bounded(&validation_text, cfg.relay.max_handoff_chars), changes);
         let review = tracked_phase(
             cfg,
-            &cfg.fusion.lead,
+            &cfg.relay.lead,
             PhaseRequest {
                 label: "lead_review",
                 prompt: &review_prompt,
@@ -981,7 +981,7 @@ pub fn run(cfg: &Config, task: &str, cwd: &Path, cache: Option<&Path>) -> Result
             &run_id,
         )?;
         let decision = review_decision(&review.text)?;
-        final_review = bounded(&review.text, cfg.fusion.max_handoff_chars);
+        final_review = bounded(&review.text, cfg.relay.max_handoff_chars);
         phases.push(review.phase);
         if decision && validation_ok {
             outcome = "accepted".into();
@@ -997,15 +997,12 @@ pub fn run(cfg: &Config, task: &str, cwd: &Path, cache: Option<&Path>) -> Result
             .map(|v| v.into_iter().sum())
     };
     let costs: Option<Vec<f64>> = phases.iter().map(|p| p.cost_usd).collect();
-    event(cache, &run_id, "outcome", &outcome, &cfg.fusion.lead, None);
+    event(cache, &run_id, "outcome", &outcome, &cfg.relay.lead, None);
     Ok(Report {
         run_id,
         outcome,
-        lead: format!("{}/{}", cfg.fusion.lead.client, cfg.fusion.lead.model),
-        sidekick: format!(
-            "{}/{}",
-            cfg.fusion.sidekick.client, cfg.fusion.sidekick.model
-        ),
+        lead: format!("{}/{}", cfg.relay.lead.client, cfg.relay.lead.model),
+        sidekick: format!("{}/{}", cfg.relay.sidekick.client, cfg.relay.sidekick.model),
         total_input_tokens: sum(|p| p.input_tokens),
         total_output_tokens: sum(|p| p.output_tokens),
         total_cost_usd: costs.map(|v| v.into_iter().sum()),
@@ -1021,7 +1018,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn adaptive_plan_reserves_fusion_for_deep_tasks() {
+    fn adaptive_plan_reserves_relay_for_deep_tasks() {
         let cfg: Config = toml::from_str(include_str!("../router.toml")).unwrap();
         let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
         assert_eq!(
@@ -1030,10 +1027,10 @@ mod tests {
         );
         assert_eq!(
             adaptive_plan(&cfg, cwd, Tier::Deep).unwrap()["mode"],
-            "fusion"
+            "relay"
         );
         let mut disabled = cfg;
-        disabled.fusion.enabled = false;
+        disabled.relay.enabled = false;
         assert_eq!(
             adaptive_plan(&disabled, cwd, Tier::Deep).unwrap()["mode"],
             "single_sidekick"
@@ -1086,13 +1083,13 @@ mod tests {
 policy_version = 1
 default = "balanced"
 
-[fusion]
+[relay]
 
-[fusion.lead]
+[relay.lead]
 client = "codex"
 model = "lead-model"
 
-[fusion.sidekick]
+[relay.sidekick]
 client = "claude"
 model = "sidekick-model"
 
@@ -1272,7 +1269,7 @@ tier = "fast"
     fn returns_successful_configured_validation_result() {
         let mut cfg = config();
         let args = vec!["-c".into(), "printf validation-marker".into()];
-        cfg.fusion.validation = vec![ai_router::FusionValidation {
+        cfg.relay.validation = vec![ai_router::RelayValidation {
             program: "/bin/sh".into(),
             args: args.clone(),
         }];
@@ -1288,27 +1285,27 @@ tier = "fast"
     }
 
     #[test]
-    fn rejects_unsupported_fusion_client_even_when_configured() {
+    fn rejects_unsupported_relay_client_even_when_configured() {
         let error = model(
             &config(),
-            &FusionRole {
+            &RelayRole {
                 client: "openrouter".into(),
                 model: "configured-but-unsupported".into(),
             },
         )
         .expect_err("unsupported client should fail");
 
-        assert_eq!(error, "unsupported fusion client: openrouter");
+        assert_eq!(error, "unsupported relay client: openrouter");
     }
 
     #[test]
-    fn rejects_unallowlisted_fusion_models() {
+    fn rejects_unallowlisted_relay_models() {
         for role in [
-            FusionRole {
+            RelayRole {
                 client: "grok".into(),
                 model: "missing-inventory".into(),
             },
-            FusionRole {
+            RelayRole {
                 client: "codex".into(),
                 model: "sidekick-model".into(),
             },
@@ -1317,7 +1314,7 @@ tier = "fast"
             assert_eq!(
                 error,
                 format!(
-                    "fusion model {} is not allowed for {}",
+                    "relay model {} is not allowed for {}",
                     role.model, role.client
                 )
             );
@@ -1325,16 +1322,14 @@ tier = "fast"
     }
 
     #[test]
-    fn accepts_allowlisted_fusion_roles() {
+    fn accepts_allowlisted_relay_roles() {
         let cfg = config();
         assert_eq!(
-            model(&cfg, &cfg.fusion.lead).expect("valid lead").id,
+            model(&cfg, &cfg.relay.lead).expect("valid lead").id,
             "lead-model"
         );
         assert_eq!(
-            model(&cfg, &cfg.fusion.sidekick)
-                .expect("valid sidekick")
-                .id,
+            model(&cfg, &cfg.relay.sidekick).expect("valid sidekick").id,
             "sidekick-model"
         );
     }
@@ -1345,21 +1340,21 @@ tier = "fast"
         dry_plan(&config(), cwd).expect("valid roles should produce a plan");
 
         let mut invalid_lead = config();
-        invalid_lead.fusion.lead.model = "missing-lead".into();
+        invalid_lead.relay.lead.model = "missing-lead".into();
         assert_eq!(
             dry_plan(&invalid_lead, cwd).expect_err("invalid lead should fail"),
-            "fusion model missing-lead is not allowed for codex"
+            "relay model missing-lead is not allowed for codex"
         );
 
         let mut invalid_sidekick = config();
-        invalid_sidekick.fusion.sidekick.model = "missing-sidekick".into();
+        invalid_sidekick.relay.sidekick.model = "missing-sidekick".into();
         assert_eq!(
             dry_plan(&invalid_sidekick, cwd).expect_err("invalid sidekick should fail"),
-            "fusion model missing-sidekick is not allowed for claude"
+            "relay model missing-sidekick is not allowed for claude"
         );
     }
     #[test]
-    fn fusion_does_not_accept_without_validation_commands() {
+    fn relay_does_not_accept_without_validation_commands() {
         let cfg = config();
         let error = run(
             &cfg,
@@ -1369,6 +1364,6 @@ tier = "fast"
         )
         .err()
         .unwrap();
-        assert_eq!(error, "fusion requires at least one validation command");
+        assert_eq!(error, "relay requires at least one validation command");
     }
 }

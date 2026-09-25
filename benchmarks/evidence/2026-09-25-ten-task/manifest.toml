@@ -183,13 +183,13 @@ id = "minimum-tier-across-cli-and-core"
 file = "src/main.rs"
 prompt = "Fix the min-tier floor in both src/main.rs adaptive CLI and src/lib.rs routing core. An adaptive dry run with --min-tier deep and a direct route request with min_tier=deep must select the deep tier. Run the Rust tests."
 healthy = '''
-                client: cfg.fusion.lead.client.clone(),
+                client: cfg.relay.lead.client.clone(),
                 task: task.clone(),
                 model: None,
                 min_tier: tier(min_tier.clone())?,
 '''
 broken = '''
-                client: cfg.fusion.lead.client.clone(),
+                client: cfg.relay.lead.client.clone(),
                 task: task.clone(),
                 model: None,
                 min_tier: None,
