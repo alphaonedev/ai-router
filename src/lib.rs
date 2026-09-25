@@ -87,6 +87,8 @@ pub struct FusionRole {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FusionConfig {
+    #[serde(default)]
+    pub enabled: bool,
     pub lead: FusionRole,
     pub sidekick: FusionRole,
     #[serde(default)]
@@ -124,6 +126,7 @@ fn default_fusion_timeout() -> u64 {
 impl Default for FusionConfig {
     fn default() -> Self {
         Self {
+            enabled: false,
             lead: FusionRole {
                 client: "codex".into(),
                 model: "gpt-6-astra".into(),

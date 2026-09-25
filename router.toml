@@ -2,6 +2,7 @@ policy_version = 6
 default = "balanced"
 
 [fusion]
+enabled = true
 min_tier = "deep"
 max_corrections = 1
 max_handoff_chars = 6000

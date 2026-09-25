@@ -287,6 +287,11 @@ fn main() -> Result<(), String> {
             dry_run,
         } => {
             let cfg = load_config(&cli.config)?;
+            if !cfg.fusion.enabled {
+                return Err(
+                    "fusion is disabled in TOML; set [fusion].enabled = true to use it".into(),
+                );
+            }
             if *dry_run {
                 println!("{}", fusion::dry_plan(&cfg, workdir)?);
             } else {

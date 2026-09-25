@@ -584,18 +584,18 @@ pub fn adaptive_plan(cfg: &Config, cwd: &Path, tier: Tier) -> Result<Value, Stri
     }
     let routine = cfg.fusion.routine.as_ref().unwrap_or(&cfg.fusion.sidekick);
     model(cfg, routine)?;
-    if tier < cfg.fusion.min_tier && cfg.fusion.validation.is_empty() {
+    if (!cfg.fusion.enabled || tier < cfg.fusion.min_tier) && cfg.fusion.validation.is_empty() {
         return Err(
             "adaptive single-agent path requires at least one fusion.validation command".into(),
         );
     }
-    let mode = if tier >= cfg.fusion.min_tier {
+    let mode = if cfg.fusion.enabled && tier >= cfg.fusion.min_tier {
         "fusion"
     } else {
         "single_sidekick"
     };
     Ok(
-        serde_json::json!({"mode":mode,"classification_tier":tier,"fusion_min_tier":cfg.fusion.min_tier,"lead":cfg.fusion.lead,"sidekick":cfg.fusion.sidekick,"routine":routine,"validation":cfg.fusion.validation,"workdir":cwd}),
+        serde_json::json!({"mode":mode,"classification_tier":tier,"fusion_enabled":cfg.fusion.enabled,"fusion_min_tier":cfg.fusion.min_tier,"lead":cfg.fusion.lead,"sidekick":cfg.fusion.sidekick,"routine":routine,"validation":cfg.fusion.validation,"workdir":cwd}),
     )
 }
 
@@ -614,7 +614,7 @@ pub fn adaptive(
     }
     let start = Instant::now();
     let run_id = uuid::Uuid::new_v4().to_string();
-    if tier >= cfg.fusion.min_tier {
+    if cfg.fusion.enabled && tier >= cfg.fusion.min_tier {
         let report = run(cfg, task, cwd, cache)?;
         return Ok(AdaptiveReport {
             run_id,
@@ -825,6 +825,30 @@ pub fn adaptive(
             patch_validation,
         });
     }
+    if !cfg.fusion.enabled {
+        event(
+            cache,
+            &run_id,
+            "outcome",
+            "validation_failed",
+            routine,
+            None,
+        );
+        return Ok(AdaptiveReport {
+            run_id,
+            mode: "single_sidekick".into(),
+            outcome: "validation_failed".into(),
+            classification_tier: tier,
+            phases: vec![work.phase],
+            validation,
+            total_cost_usd: total_cost,
+            duration_ms: start.elapsed().as_millis(),
+            fusion: None,
+            patch: patch_record,
+            patch_attempts,
+            patch_validation,
+        });
+    }
     eprintln!("adaptive: validation failed; escalating to Fusion");
     let report = run(cfg, task, cwd, cache)?;
     let total_cost = total_cost.zip(report.total_cost_usd).map(|(a, b)| a + b);
@@ -1007,6 +1031,12 @@ mod tests {
         assert_eq!(
             adaptive_plan(&cfg, cwd, Tier::Deep).unwrap()["mode"],
             "fusion"
+        );
+        let mut disabled = cfg;
+        disabled.fusion.enabled = false;
+        assert_eq!(
+            adaptive_plan(&disabled, cwd, Tier::Deep).unwrap()["mode"],
+            "single_sidekick"
         );
     }
 

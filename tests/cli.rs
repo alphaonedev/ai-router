@@ -92,6 +92,9 @@ fn fusion_dry_run_loads_workflow_and_roles_from_config() {
     assert_eq!(plan["lead"]["model"], "gpt-6-astra");
     assert_eq!(plan["sidekick"]["client"], "codex");
     assert_eq!(plan["sidekick"]["model"], "gpt-5.6-sol");
+    assert_eq!(plan["lead"]["model"], "gpt-6-astra");
+    assert_eq!(plan["sidekick"]["client"], "codex");
+    assert_eq!(plan["sidekick"]["model"], "gpt-5.6-sol");
 }
 
 #[test]
