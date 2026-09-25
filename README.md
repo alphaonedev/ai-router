@@ -38,6 +38,18 @@ Any arguments after `--` are passed to the underlying CLI. Model and effort flag
 
 ## Fusion workflow
 
+### Adaptive entry point
+
+`adaptive` classifies a new task using the configured router. Below `[fusion].min_tier` (default `deep`), it starts one sidekick session and runs every configured validation command. A failed validation escalates to the full lead–sidekick workflow, and the reported cost includes both attempts. At or above the threshold, it starts Fusion immediately. This avoids paying planning and review overhead for routine tasks while keeping a quality gate. A green validation command does not prove every behavior; use checks that exercise the task's acceptance criteria.
+
+```sh
+./target/release/ai-router adaptive --task 'Fix the parser test' --dry-run
+./target/release/ai-router adaptive --task 'Fix the parser test' --workdir .
+./target/release/ai-router adaptive --task 'Investigate a production race condition' --high-stakes --workdir .
+```
+
+The classifier decision and the execution path are shown in the dry run. `--offline` limits optional decision services, though the selected coding CLI still uses its own model service. `min_tier`, roles, and validation commands are TOML settings. For cost comparisons, include failed single-agent attempts and escalations.
+
 Inspired by [Cognition's Local Fusion architecture](https://cognition.com/blog/local-fusion), `fusion` runs a lead planning phase, a sidekick implementation phase, local validation, and a lead review. The lead works in an isolated copy of Git-tracked and nonignored untracked files, refreshed before review; the sidekick works in the original repository. The copy prevents accidental relative-path writes by the lead from changing original files; it is not an OS security sandbox for absolute paths or external tools. The lead and sidekick keep separate resumable CLI sessions on fixed models. A review requesting changes sends bounded feedback to the same sidekick session, then returns to the same lead session. Roles, handoff size, correction limit, per-phase timeout, and validation commands live in `[fusion]`, `[fusion.lead]`, `[fusion.sidekick]`, and `[[fusion.validation]]` in `router.toml`. Validation commands run by the Rust coordinator in the workdir and must pass before acceptance. The selected models must be in the relevant allowlists. The lead's `DECISION: ACCEPT` is an agent review result, not a substitute for independent validation.
 
 ```sh

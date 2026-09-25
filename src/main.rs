@@ -26,6 +26,21 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Select one validated sidekick or the full Fusion workflow for a new task.
+    Adaptive {
+        #[arg(long)]
+        task: String,
+        #[arg(long, default_value = ".")]
+        workdir: PathBuf,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        high_stakes: bool,
+        #[arg(long)]
+        offline: bool,
+        #[arg(long)]
+        min_tier: Option<String>,
+    },
     /// Run a persistent lead and sidekick workflow from TOML roles.
     Fusion {
         #[arg(long)]
@@ -196,6 +211,45 @@ fn cache(cli: &Cli) -> Option<PathBuf> {
 fn main() -> Result<(), String> {
     let cli = Cli::parse();
     match &cli.command {
+        Action::Adaptive {
+            task,
+            workdir,
+            dry_run,
+            high_stakes,
+            offline,
+            min_tier,
+        } => {
+            let cfg = load_config(&cli.config)?;
+            let req = Request {
+                client: cfg.fusion.lead.client.clone(),
+                task: task.clone(),
+                model: None,
+                min_tier: tier(min_tier.clone())?,
+                high_stakes: *high_stakes,
+                offline: *offline,
+            };
+            let decision = route(&req, &cfg, cache(&cli).as_deref())?;
+            if *dry_run {
+                println!(
+                    "{}",
+                    serde_json::json!({"routing":decision,"execution":fusion::adaptive_plan(&cfg, workdir, decision.tier)?})
+                );
+            } else {
+                let report =
+                    fusion::adaptive(&cfg, task, workdir, cache(&cli).as_deref(), decision.tier)?;
+                println!(
+                    "{}",
+                    serde_json::to_string(&report).map_err(|e| e.to_string())?
+                );
+                if !["validated", "accepted"].contains(&report.outcome.as_str()) {
+                    return Err(
+                        "adaptive workflow ended without successful validation or lead acceptance"
+                            .into(),
+                    );
+                }
+            }
+            Ok(())
+        }
         Action::Fusion {
             task,
             workdir,

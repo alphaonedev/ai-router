@@ -61,6 +61,11 @@ pub struct FusionConfig {
     pub timeout_secs: u64,
     #[serde(default)]
     pub validation: Vec<FusionValidation>,
+    #[serde(default = "default_fusion_min_tier")]
+    pub min_tier: Tier,
+}
+fn default_fusion_min_tier() -> Tier {
+    Tier::Deep
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -93,6 +98,7 @@ impl Default for FusionConfig {
             max_handoff_chars: default_fusion_chars(),
             timeout_secs: default_fusion_timeout(),
             validation: Vec::new(),
+            min_tier: default_fusion_min_tier(),
         }
     }
 }

@@ -1,4 +1,4 @@
-use ai_router::{Config, FusionRole, Model};
+use ai_router::{Config, FusionRole, Model, Tier};
 use serde::Serialize;
 use serde_json::Value;
 use std::{
@@ -38,6 +38,18 @@ pub struct Report {
     pub duration_ms: u128,
     pub review: String,
     pub validation: Vec<ValidationResult>,
+}
+#[derive(Serialize)]
+pub struct AdaptiveReport {
+    pub run_id: String,
+    pub mode: String,
+    pub outcome: String,
+    pub classification_tier: Tier,
+    pub phases: Vec<Phase>,
+    pub validation: Vec<ValidationResult>,
+    pub fusion: Option<Report>,
+    pub total_cost_usd: Option<f64>,
+    pub duration_ms: u128,
 }
 #[derive(Serialize)]
 pub struct ValidationResult {
@@ -561,6 +573,122 @@ pub fn dry_plan(cfg: &Config, cwd: &Path) -> Result<Value, String> {
     )
 }
 
+pub fn adaptive_plan(cfg: &Config, cwd: &Path, tier: Tier) -> Result<Value, String> {
+    dry_plan(cfg, cwd)?;
+    if tier < cfg.fusion.min_tier && cfg.fusion.validation.is_empty() {
+        return Err(
+            "adaptive single-agent path requires at least one fusion.validation command".into(),
+        );
+    }
+    let mode = if tier >= cfg.fusion.min_tier {
+        "fusion"
+    } else {
+        "single_sidekick"
+    };
+    Ok(
+        serde_json::json!({"mode":mode,"classification_tier":tier,"fusion_min_tier":cfg.fusion.min_tier,"lead":cfg.fusion.lead,"sidekick":cfg.fusion.sidekick,"validation":cfg.fusion.validation,"workdir":cwd}),
+    )
+}
+
+pub fn adaptive(
+    cfg: &Config,
+    task: &str,
+    cwd: &Path,
+    cache: Option<&Path>,
+    tier: Tier,
+) -> Result<AdaptiveReport, String> {
+    adaptive_plan(cfg, cwd, tier)?;
+    if task.trim().is_empty() {
+        return Err("task required".into());
+    }
+    let start = Instant::now();
+    let run_id = uuid::Uuid::new_v4().to_string();
+    if tier >= cfg.fusion.min_tier {
+        let report = run(cfg, task, cwd, cache)?;
+        return Ok(AdaptiveReport {
+            run_id,
+            mode: "fusion".into(),
+            outcome: report.outcome.clone(),
+            classification_tier: tier,
+            total_cost_usd: report.total_cost_usd,
+            duration_ms: start.elapsed().as_millis(),
+            phases: Vec::new(),
+            validation: Vec::new(),
+            fusion: Some(report),
+        });
+    }
+    let session = uuid::Uuid::new_v4().to_string();
+    let prompt = format!("Implement this task in the current repository. Inspect files as needed, run relevant checks, and report the change and any unresolved issue. Do not commit or push.\n\nTask:\n{task}");
+    eprintln!(
+        "adaptive: single sidekick {} / {}",
+        cfg.fusion.sidekick.client, cfg.fusion.sidekick.model
+    );
+    let work = tracked_phase(
+        cfg,
+        &cfg.fusion.sidekick,
+        PhaseRequest {
+            label: "single_sidekick",
+            prompt: &prompt,
+            session: &session,
+            resume: false,
+            readonly: false,
+            cwd,
+        },
+        cache,
+        &run_id,
+    )?;
+    let validation = validate(cfg, cwd)?;
+    let passed = validation.iter().all(|v| v.success);
+    let local_role = FusionRole {
+        client: "local".into(),
+        model: "validation".into(),
+    };
+    event(
+        cache,
+        &run_id,
+        "validation",
+        if passed { "passed" } else { "failed" },
+        &local_role,
+        None,
+    );
+    let cost = work.phase.cost_usd;
+    if passed {
+        event(
+            cache,
+            &run_id,
+            "outcome",
+            "validated",
+            &cfg.fusion.sidekick,
+            None,
+        );
+        return Ok(AdaptiveReport {
+            run_id,
+            mode: "single_sidekick".into(),
+            outcome: "validated".into(),
+            classification_tier: tier,
+            phases: vec![work.phase],
+            validation,
+            fusion: None,
+            total_cost_usd: cost,
+            duration_ms: start.elapsed().as_millis(),
+        });
+    }
+    eprintln!("adaptive: validation failed; escalating to Fusion");
+    let report = run(cfg, task, cwd, cache)?;
+    let total_cost = cost.zip(report.total_cost_usd).map(|(a, b)| a + b);
+    Ok(AdaptiveReport {
+        run_id,
+        mode: "escalated".into(),
+        outcome: report.outcome.clone(),
+        classification_tier: tier,
+        phases: vec![work.phase],
+        validation,
+        total_cost_usd: total_cost,
+        duration_ms: start.elapsed().as_millis(),
+        fusion: Some(report),
+    })
+}
+
 pub fn run(cfg: &Config, task: &str, cwd: &Path, cache: Option<&Path>) -> Result<Report, String> {
     dry_plan(cfg, cwd)?;
     if task.trim().is_empty() {
@@ -709,6 +837,20 @@ pub fn run(cfg: &Config, task: &str, cwd: &Path, cache: Option<&Path>) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adaptive_plan_reserves_fusion_for_deep_tasks() {
+        let cfg: Config = toml::from_str(include_str!("../router.toml")).unwrap();
+        let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert_eq!(
+            adaptive_plan(&cfg, cwd, Tier::Balanced).unwrap()["mode"],
+            "single_sidekick"
+        );
+        assert_eq!(
+            adaptive_plan(&cfg, cwd, Tier::Deep).unwrap()["mode"],
+            "fusion"
+        );
+    }
 
     #[test]
     fn review_accepts_one_standalone_marker_after_preface() {
