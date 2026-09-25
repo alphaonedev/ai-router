@@ -41,6 +41,33 @@ pub struct Config {
     pub openrouter: OpenRouterConfig,
     #[serde(default)]
     pub fusion: FusionConfig,
+    #[serde(default)]
+    pub patch: PatchConfig,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PatchConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_patch_model")]
+    pub model: String,
+    #[serde(default = "default_patch_file_bytes")]
+    pub max_file_bytes: usize,
+}
+fn default_patch_model() -> String {
+    "google/gemini-3.5-flash-lite".into()
+}
+fn default_patch_file_bytes() -> usize {
+    20_000
+}
+impl Default for PatchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: default_patch_model(),
+            max_file_bytes: default_patch_file_bytes(),
+        }
+    }
 }
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -53,6 +80,8 @@ pub struct FusionRole {
 pub struct FusionConfig {
     pub lead: FusionRole,
     pub sidekick: FusionRole,
+    #[serde(default)]
+    pub routine: Option<FusionRole>,
     #[serde(default = "default_fusion_corrections")]
     pub max_corrections: u8,
     #[serde(default = "default_fusion_chars")]
@@ -94,6 +123,7 @@ impl Default for FusionConfig {
                 client: "codex".into(),
                 model: "gpt-5.6-sol".into(),
             },
+            routine: None,
             max_corrections: default_fusion_corrections(),
             max_handoff_chars: default_fusion_chars(),
             timeout_secs: default_fusion_timeout(),
@@ -173,6 +203,7 @@ pub struct OpenRouterResult {
     pub content: String,
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
+    pub cost_usd: Option<f64>,
 }
 fn checked_api_url(base: &str) -> Result<String, String> {
     let url = url::Url::parse(base).map_err(|e| e.to_string())?;
@@ -199,7 +230,7 @@ pub fn openrouter_chat(
         .timeout_global(Some(std::time::Duration::from_secs(120)))
         .build()
         .into();
-    let body = serde_json::json!({"model":model,"messages":[{"role":"user","content":task}],"stream":false});
+    let body = serde_json::json!({"model":model,"messages":[{"role":"user","content":task}],"stream":false,"usage":{"include":true}});
     let response: serde_json::Value = agent
         .post(&format!("{base}/chat/completions"))
         .header("Authorization", &format!("Bearer {key}"))
@@ -219,6 +250,7 @@ pub fn openrouter_chat(
         content,
         prompt_tokens: response["usage"]["prompt_tokens"].as_u64(),
         completion_tokens: response["usage"]["completion_tokens"].as_u64(),
+        cost_usd: response["usage"]["cost"].as_f64(),
     })
 }
 pub fn openrouter_models(cfg: &OpenRouterConfig) -> Result<Vec<String>, String> {

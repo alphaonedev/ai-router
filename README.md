@@ -40,15 +40,16 @@ Any arguments after `--` are passed to the underlying CLI. Model and effort flag
 
 ### Adaptive entry point
 
-`adaptive` classifies a new task using the configured router. Below `[fusion].min_tier` (default `deep`), it starts one sidekick session and runs every configured validation command. A failed validation escalates to the full lead–sidekick workflow, and the reported cost includes both attempts. At or above the threshold, it starts Fusion immediately. This avoids paying planning and review overhead for routine tasks while keeping a quality gate. A green validation command does not prove every behavior; use checks that exercise the task's acceptance criteria.
+`adaptive` classifies a new task using the configured router. Below `[fusion].min_tier` (default `deep`), it can first ask a low-cost OpenRouter model for one exact edit to a specified file. The Rust coordinator accepts only an exact, unique replacement inside that file, runs every configured validation command, and rolls back if validation fails. A rejected edit or unavailable API goes to `[fusion.routine]` (Claude Haiku in the checked-in TOML); failed validation there escalates to the full lead–sidekick workflow. The reported cost includes rejected patch calls and fallbacks. At or above the threshold, it starts Fusion immediately. A green validation command does not prove every behavior; use checks that exercise the task's acceptance criteria.
 
 ```sh
 ./target/release/ai-router adaptive --task 'Fix the parser test' --dry-run
 ./target/release/ai-router adaptive --task 'Fix the parser test' --workdir .
+./target/release/ai-router adaptive --task 'Fix the parser test' --file src/parser.rs --workdir .
 ./target/release/ai-router adaptive --task 'Investigate a production race condition' --high-stakes --workdir .
 ```
 
-The classifier decision and the execution path are shown in the dry run. `--offline` limits optional decision services, though the selected coding CLI still uses its own model service. `min_tier`, roles, and validation commands are TOML settings. For cost comparisons, include failed single-agent attempts and escalations.
+The classifier decision and the execution path are shown in the dry run. `--file` must be a relative path inside `--workdir`; no file is sent to OpenRouter without it. `--offline` skips the OpenRouter patch and limits optional decision services, though the selected coding CLI still uses its own model service. `min_tier`, roles, and validation commands are TOML settings. The checked-in `[patch]` is enabled but activates only when `OPENROUTER_API_KEY` exists. For cost comparisons, include failed patch calls, single-agent attempts, and escalations.
 
 Inspired by [Cognition's Local Fusion architecture](https://cognition.com/blog/local-fusion), `fusion` runs a lead planning phase, a sidekick implementation phase, local validation, and a lead review. The lead works in an isolated copy of Git-tracked and nonignored untracked files, refreshed before review; the sidekick works in the original repository. The copy prevents accidental relative-path writes by the lead from changing original files; it is not an OS security sandbox for absolute paths or external tools. The lead and sidekick keep separate resumable CLI sessions on fixed models. A review requesting changes sends bounded feedback to the same sidekick session, then returns to the same lead session. Roles, handoff size, correction limit, per-phase timeout, and validation commands live in `[fusion]`, `[fusion.lead]`, `[fusion.sidekick]`, and `[[fusion.validation]]` in `router.toml`. Validation commands run by the Rust coordinator in the workdir and must pass before acceptance. The selected models must be in the relevant allowlists. The lead's `DECISION: ACCEPT` is an agent review result, not a substitute for independent validation.
 
@@ -117,6 +118,8 @@ OPENROUTER_API_KEY=... ./target/release/ai-router run openrouter --task 'Summari
 ```
 
 The final command uses [OpenRouter's chat completions API](https://openrouter.ai/docs/quickstart) and prints the response plus reported token usage. It requires a key and network connection and supports single-turn text tasks; it does not replace a coding harness's tool loop or its subscription billing. The endpoint can be changed in TOML for a compatible local test server. Remote endpoints must use HTTPS. A live key-backed call to `google/gemini-3.5-flash-lite` returned `ROUTER_OK` with 6 input and 4 output tokens on 25 September 2026.
+
+Gemma 4 26B A4B is also allowlisted as paid and free OpenRouter models. Select either ID explicitly with `run openrouter --model ...`; the free endpoint is rate limited and model outputs still need local validation. For local Gemma, [Google documents Ollama tags](https://ai.google.dev/gemma/docs/integrations/ollama) including `gemma4:e2b` and `gemma4:e4b`. Start an OpenAI-compatible local server, set `[openrouter].base_url = "http://127.0.0.1:11434/v1"` and a matching `[[models.openrouter]]` ID in a separate TOML config, then use a nonsecret placeholder `OPENROUTER_API_KEY=local`. On this 8 GB M3 laptop, start with a quantized E2B model and measure memory, latency, and patch quality before considering larger variants. Inference kernels are supplied by the local runtime, outside ai-router's Rust routing layer.
 
 ## TOON
 

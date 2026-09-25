@@ -1,3 +1,4 @@
+use crate::patch::{self, PatchAttempt};
 use ai_router::{Config, FusionRole, Model, Tier};
 use serde::Serialize;
 use serde_json::Value;
@@ -48,6 +49,8 @@ pub struct AdaptiveReport {
     pub phases: Vec<Phase>,
     pub validation: Vec<ValidationResult>,
     pub fusion: Option<Report>,
+    pub patch: Option<PatchAttempt>,
+    pub patch_validation: Vec<ValidationResult>,
     pub total_cost_usd: Option<f64>,
     pub duration_ms: u128,
 }
@@ -575,6 +578,8 @@ pub fn dry_plan(cfg: &Config, cwd: &Path) -> Result<Value, String> {
 
 pub fn adaptive_plan(cfg: &Config, cwd: &Path, tier: Tier) -> Result<Value, String> {
     dry_plan(cfg, cwd)?;
+    let routine = cfg.fusion.routine.as_ref().unwrap_or(&cfg.fusion.sidekick);
+    model(cfg, routine)?;
     if tier < cfg.fusion.min_tier && cfg.fusion.validation.is_empty() {
         return Err(
             "adaptive single-agent path requires at least one fusion.validation command".into(),
@@ -586,7 +591,7 @@ pub fn adaptive_plan(cfg: &Config, cwd: &Path, tier: Tier) -> Result<Value, Stri
         "single_sidekick"
     };
     Ok(
-        serde_json::json!({"mode":mode,"classification_tier":tier,"fusion_min_tier":cfg.fusion.min_tier,"lead":cfg.fusion.lead,"sidekick":cfg.fusion.sidekick,"validation":cfg.fusion.validation,"workdir":cwd}),
+        serde_json::json!({"mode":mode,"classification_tier":tier,"fusion_min_tier":cfg.fusion.min_tier,"lead":cfg.fusion.lead,"sidekick":cfg.fusion.sidekick,"routine":routine,"validation":cfg.fusion.validation,"workdir":cwd}),
     )
 }
 
@@ -596,6 +601,8 @@ pub fn adaptive(
     cwd: &Path,
     cache: Option<&Path>,
     tier: Tier,
+    file: Option<&Path>,
+    offline: bool,
 ) -> Result<AdaptiveReport, String> {
     adaptive_plan(cfg, cwd, tier)?;
     if task.trim().is_empty() {
@@ -615,17 +622,71 @@ pub fn adaptive(
             phases: Vec::new(),
             validation: Vec::new(),
             fusion: Some(report),
+            patch: None,
+            patch_validation: Vec::new(),
         });
+    }
+    let mut patch_record = None;
+    let mut patch_validation = Vec::new();
+    if let Some(file) = file.filter(|_| {
+        !offline && cfg.patch.enabled && std::env::var(&cfg.openrouter.api_key_env).is_ok()
+    }) {
+        eprintln!("adaptive: bounded OpenRouter patch for {}", file.display());
+        match patch::attempt(cfg, task, cwd, file) {
+            Ok((attempt, applied)) => {
+                let patch_cost = attempt.cost_usd;
+                let patch_role = FusionRole {
+                    client: "openrouter".into(),
+                    model: attempt.model.clone(),
+                };
+                event(
+                    cache,
+                    &run_id,
+                    "patch",
+                    if attempt.applied {
+                        "applied"
+                    } else {
+                        "rejected"
+                    },
+                    &patch_role,
+                    None,
+                );
+                patch_record = Some(attempt);
+                if let Some(applied) = applied {
+                    patch_validation = validate(cfg, cwd)?;
+                    if patch_validation.iter().all(|v| v.success) {
+                        event(cache, &run_id, "validation", "passed", &patch_role, None);
+                        return Ok(AdaptiveReport {
+                            run_id,
+                            mode: "openrouter_patch".into(),
+                            outcome: "validated".into(),
+                            classification_tier: tier,
+                            phases: Vec::new(),
+                            validation: patch_validation,
+                            patch_validation: Vec::new(),
+                            fusion: None,
+                            total_cost_usd: patch_cost,
+                            duration_ms: start.elapsed().as_millis(),
+                            patch: patch_record,
+                        });
+                    }
+                    event(cache, &run_id, "validation", "failed", &patch_role, None);
+                    applied.rollback()?;
+                }
+            }
+            Err(error) => eprintln!("adaptive: patch skipped: {error}"),
+        }
     }
     let session = uuid::Uuid::new_v4().to_string();
     let prompt = format!("Implement this task in the current repository. Inspect files as needed, run relevant checks, and report the change and any unresolved issue. Do not commit or push.\n\nTask:\n{task}");
+    let routine = cfg.fusion.routine.as_ref().unwrap_or(&cfg.fusion.sidekick);
     eprintln!(
         "adaptive: single sidekick {} / {}",
-        cfg.fusion.sidekick.client, cfg.fusion.sidekick.model
+        routine.client, routine.model
     );
     let work = tracked_phase(
         cfg,
-        &cfg.fusion.sidekick,
+        routine,
         PhaseRequest {
             label: "single_sidekick",
             prompt: &prompt,
@@ -652,15 +713,12 @@ pub fn adaptive(
         None,
     );
     let cost = work.phase.cost_usd;
+    let total_cost = match &patch_record {
+        Some(p) => p.cost_usd.zip(cost).map(|(a, b)| a + b),
+        None => cost,
+    };
     if passed {
-        event(
-            cache,
-            &run_id,
-            "outcome",
-            "validated",
-            &cfg.fusion.sidekick,
-            None,
-        );
+        event(cache, &run_id, "outcome", "validated", routine, None);
         return Ok(AdaptiveReport {
             run_id,
             mode: "single_sidekick".into(),
@@ -669,13 +727,15 @@ pub fn adaptive(
             phases: vec![work.phase],
             validation,
             fusion: None,
-            total_cost_usd: cost,
+            total_cost_usd: total_cost,
             duration_ms: start.elapsed().as_millis(),
+            patch: patch_record,
+            patch_validation,
         });
     }
     eprintln!("adaptive: validation failed; escalating to Fusion");
     let report = run(cfg, task, cwd, cache)?;
-    let total_cost = cost.zip(report.total_cost_usd).map(|(a, b)| a + b);
+    let total_cost = total_cost.zip(report.total_cost_usd).map(|(a, b)| a + b);
     Ok(AdaptiveReport {
         run_id,
         mode: "escalated".into(),
@@ -686,6 +746,8 @@ pub fn adaptive(
         total_cost_usd: total_cost,
         duration_ms: start.elapsed().as_millis(),
         fusion: Some(report),
+        patch: patch_record,
+        patch_validation,
     })
 }
 

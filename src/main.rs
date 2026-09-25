@@ -10,6 +10,7 @@ use std::{
 };
 mod fusion;
 mod observability;
+mod patch;
 #[derive(Parser)]
 #[command(
     name = "ai-router",
@@ -40,6 +41,8 @@ enum Action {
         offline: bool,
         #[arg(long)]
         min_tier: Option<String>,
+        #[arg(long)]
+        file: Option<PathBuf>,
     },
     /// Run a persistent lead and sidekick workflow from TOML roles.
     Fusion {
@@ -218,6 +221,7 @@ fn main() -> Result<(), String> {
             high_stakes,
             offline,
             min_tier,
+            file,
         } => {
             let cfg = load_config(&cli.config)?;
             let req = Request {
@@ -232,11 +236,18 @@ fn main() -> Result<(), String> {
             if *dry_run {
                 println!(
                     "{}",
-                    serde_json::json!({"routing":decision,"execution":fusion::adaptive_plan(&cfg, workdir, decision.tier)?})
+                    serde_json::json!({"routing":decision,"execution":fusion::adaptive_plan(&cfg, workdir, decision.tier)?,"patch_file":file})
                 );
             } else {
-                let report =
-                    fusion::adaptive(&cfg, task, workdir, cache(&cli).as_deref(), decision.tier)?;
+                let report = fusion::adaptive(
+                    &cfg,
+                    task,
+                    workdir,
+                    cache(&cli).as_deref(),
+                    decision.tier,
+                    file.as_deref(),
+                    *offline,
+                )?;
                 println!(
                     "{}",
                     serde_json::to_string(&report).map_err(|e| e.to_string())?
