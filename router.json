@@ -1,0 +1,22 @@
+{
+  "policy_version": 1,
+  "default": "balanced",
+  "jev": {"enabled": false, "min_confidence": 0.75},
+  "models": {
+    "claude": [
+      {"id":"haiku","tier":"fast","effort":"low","description":"Low cost Claude model for routine tasks"},
+      {"id":"sonnet","tier":"balanced","effort":"medium","description":"General Claude coding model"},
+      {"id":"opus","tier":"deep","effort":"high","description":"Strong Claude reasoning model"}
+    ],
+    "codex": [
+      {"id":"gpt-5.1-codex-mini","tier":"fast","description":"Low cost Codex model for routine tasks"},
+      {"id":"gpt-5.3-codex","tier":"balanced","description":"General Codex coding model"},
+      {"id":"gpt-5.3-codex","tier":"deep","description":"Strong Codex model; set reasoning effort in Codex config"}
+    ],
+    "grok": [
+      {"id":"grok-code-fast-1","tier":"fast","description":"Fast Grok coding model"},
+      {"id":"grok-4","tier":"balanced","description":"General Grok model"},
+      {"id":"grok-4-heavy","tier":"deep","description":"Higher reasoning Grok model; edit to your subscription availability"}
+    ]
+  }
+}

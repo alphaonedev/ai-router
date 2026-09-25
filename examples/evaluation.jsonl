@@ -1,0 +1,3 @@
+{"request":{"client":"claude","task":"Format this Rust module","offline":true},"minimum_tier":"fast"}
+{"request":{"client":"claude","task":"Debug a production race condition","offline":true},"minimum_tier":"deep"}
+{"request":{"client":"codex","task":"Implement a new feature with tests","offline":true},"minimum_tier":"balanced"}
