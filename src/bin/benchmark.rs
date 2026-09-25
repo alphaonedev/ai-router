@@ -2,9 +2,10 @@ use ai_router::{load_config, savings, FusionRole, FusionValidation, Measurement}
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     fs,
     io::Write,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::{Command, Output},
     time::Instant,
 };
@@ -19,6 +20,13 @@ struct Cli {
     limit: Option<usize>,
     #[arg(long, default_value_t = 0)]
     start: usize,
+    #[arg(long, default_value = "grok")]
+    baseline_client: String,
+    #[arg(long)]
+    baseline_model: Option<String>,
+    /// Reuse measured baseline arms from a previous run on the same manifest.
+    #[arg(long)]
+    baseline_results: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -47,7 +55,7 @@ struct Task {
     test: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct Arm {
     cost_usd: Option<f64>,
     input_tokens: Option<u64>,
@@ -66,9 +74,22 @@ struct Record<'a> {
     task_prompt: &'a str,
     file: &'a str,
     baseline_model: &'a str,
+    baseline_client: &'a str,
+    baseline_reused: bool,
     routed_model: &'a str,
     baseline: Arm,
     routed: Arm,
+}
+
+#[derive(Deserialize)]
+struct PreviousRecord {
+    task_id: String,
+    source_ref: String,
+    task_prompt: String,
+    file: String,
+    baseline_model: String,
+    baseline_client: String,
+    baseline: Arm,
 }
 
 fn run(cmd: &mut Command) -> Result<Output, String> {
@@ -96,7 +117,16 @@ fn mutate(root: &Path, file: &str, healthy: &str, broken: &str, id: &str) -> Res
         }
         return Err(format!("{id} has replacement but no source text"));
     }
-    let path = root.join(file);
+    if Path::new(file)
+        .components()
+        .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        return Err(format!("{id} has unsafe file path"));
+    }
+    let path = fs::canonicalize(root.join(file)).map_err(|e| e.to_string())?;
+    if !path.starts_with(fs::canonicalize(root).map_err(|e| e.to_string())?) {
+        return Err(format!("{id} file leaves fixture"));
+    }
     let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
     if raw.matches(healthy).count() != 1 {
         return Err(format!("{id} mutation in {file} is not unique"));
@@ -148,21 +178,48 @@ fn main() -> Result<(), String> {
     let manifest: Manifest =
         toml::from_str(&fs::read_to_string(&cli.manifest).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
+    if !["grok", "claude"].contains(&cli.baseline_client.as_str()) {
+        return Err("baseline client must be grok or claude".into());
+    }
+    let baseline_model = cli
+        .baseline_model
+        .as_deref()
+        .unwrap_or(&manifest.baseline_model);
+    let mut prior: HashMap<String, PreviousRecord> = HashMap::new();
+    if let Some(path) = &cli.baseline_results {
+        let raw = fs::read_to_string(path).map_err(|e| e.to_string())?;
+        for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+            let record: PreviousRecord = serde_json::from_str(line).map_err(|e| e.to_string())?;
+            if prior.insert(record.task_id.clone(), record).is_some() {
+                return Err("duplicate task in baseline results".into());
+            }
+        }
+    }
     let run_id = uuid::Uuid::new_v4().to_string();
     let run_dir = repo.join(&cli.output_dir).join(&run_id);
     fs::create_dir_all(&run_dir).map_err(|e| e.to_string())?;
     fs::copy(&cli.manifest, run_dir.join("manifest.toml")).map_err(|e| e.to_string())?;
+    if let Some(path) = &cli.baseline_results {
+        fs::copy(path, run_dir.join("baseline-results.jsonl")).map_err(|e| e.to_string())?;
+    }
     let router_bin = repo.join("target/release/ai-router");
     if !router_bin.exists() {
         return Err("build first with cargo build --release --bins".into());
     }
     let mut cfg = load_config(&repo.join("router.toml"))?;
+    if !cfg
+        .models
+        .get(&cli.baseline_client)
+        .is_some_and(|models| models.iter().any(|model| model.id == baseline_model))
+    {
+        return Err("baseline model is not allowlisted for the selected client".into());
+    }
     cfg.patch.enabled = true;
     cfg.patch.model = manifest.patch_model.clone();
     cfg.patch.max_file_bytes = 100_000;
     cfg.fusion.lead = FusionRole {
-        client: "grok".into(),
-        model: manifest.baseline_model.clone(),
+        client: cli.baseline_client.clone(),
+        model: baseline_model.into(),
     };
     cfg.fusion.sidekick = FusionRole {
         client: "claude".into(),
@@ -188,46 +245,93 @@ fn main() -> Result<(), String> {
         .skip(cli.start)
         .take(cli.limit.unwrap_or(usize::MAX));
     for task in tasks {
+        if task.id.is_empty()
+            || !task
+                .id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        {
+            return Err(
+                "task id must contain only letters, digits, hyphens, or underscores".into(),
+            );
+        }
         eprintln!("benchmark: {}", task.id);
         let task_dir = run_dir.join(&task.id);
         fs::create_dir_all(&task_dir).map_err(|e| e.to_string())?;
         let baseline_dir = task_dir.join("baseline");
         let routed_dir = task_dir.join("routed");
-        prepare(&repo, &baseline_dir, &manifest.source_ref, task)?;
+        if cli.baseline_results.is_none() {
+            prepare(&repo, &baseline_dir, &manifest.source_ref, task)?;
+        }
         prepare(&repo, &routed_dir, &manifest.source_ref, task)?;
-        for fixture in [&baseline_dir, &routed_dir] {
+        let fixtures: Vec<&PathBuf> = if cli.baseline_results.is_some() {
+            vec![&routed_dir]
+        } else {
+            vec![&baseline_dir, &routed_dir]
+        };
+        for fixture in fixtures {
             if check(fixture, &["test", "-q", "--test", "benchmark_regression"])? {
                 return Err(format!("{} fixture does not fail before repair", task.id));
             }
         }
-        let start = Instant::now();
-        let baseline_output = run(Command::new("grok")
-            .args([
-                "--single",
-                &task.prompt,
-                "--model",
-                &manifest.baseline_model,
-            ])
-            .args(["--reasoning-effort", "high", "--output-format", "json"])
-            .args(["--always-approve", "--cwd"])
-            .arg(&baseline_dir))?;
-        let baseline_duration = start.elapsed().as_millis();
-        save_output(&task_dir.join("baseline-agent"), &baseline_output)?;
-        let baseline_json = parse_json(&baseline_output)?;
-        let baseline_acceptance = check(
-            &baseline_dir,
-            &["test", "-q", "--test", "benchmark_regression"],
-        )?;
-        let baseline_suite = check(&baseline_dir, &["test", "-q"])?;
-        let baseline = Arm {
-            cost_usd: baseline_json["total_cost_usd"].as_f64(),
-            input_tokens: baseline_json["usage"]["input_tokens"].as_u64(),
-            output_tokens: baseline_json["usage"]["output_tokens"].as_u64(),
-            duration_ms: baseline_duration,
-            agent_exit_success: baseline_output.status.success(),
-            acceptance_success: baseline_acceptance,
-            full_suite_success: baseline_suite,
-            mode: "grok-single-agent".into(),
+        let baseline = if cli.baseline_results.is_some() {
+            let previous = prior.remove(&task.id).ok_or("baseline task missing")?;
+            if previous.source_ref != manifest.source_ref
+                || previous.task_prompt != task.prompt
+                || previous.file != task.file
+                || previous.baseline_model != baseline_model
+                || previous.baseline_client != cli.baseline_client
+                || !previous.baseline.agent_exit_success
+                || !previous.baseline.acceptance_success
+                || !previous.baseline.full_suite_success
+                || previous.baseline.cost_usd.is_none()
+            {
+                return Err(format!("{} prior baseline is not comparable", task.id));
+            }
+            previous.baseline
+        } else {
+            let start = Instant::now();
+            let mut baseline_command = Command::new(&cli.baseline_client);
+            match cli.baseline_client.as_str() {
+                "grok" => {
+                    baseline_command
+                        .args(["--single", &task.prompt, "--model", baseline_model])
+                        .args(["--reasoning-effort", "high", "--output-format", "json"])
+                        .args(["--always-approve", "--cwd"])
+                        .arg(&baseline_dir);
+                }
+                "claude" => {
+                    baseline_command
+                        .args(["--print", &task.prompt, "--model", baseline_model])
+                        .args([
+                            "--output-format",
+                            "json",
+                            "--permission-mode",
+                            "acceptEdits",
+                        ])
+                        .current_dir(&baseline_dir);
+                }
+                _ => unreachable!(),
+            }
+            let baseline_output = run(&mut baseline_command)?;
+            let baseline_duration = start.elapsed().as_millis();
+            save_output(&task_dir.join("baseline-agent"), &baseline_output)?;
+            let baseline_json = parse_json(&baseline_output)?;
+            let baseline_acceptance = check(
+                &baseline_dir,
+                &["test", "-q", "--test", "benchmark_regression"],
+            )?;
+            let baseline_suite = check(&baseline_dir, &["test", "-q"])?;
+            Arm {
+                cost_usd: baseline_json["total_cost_usd"].as_f64(),
+                input_tokens: baseline_json["usage"]["input_tokens"].as_u64(),
+                output_tokens: baseline_json["usage"]["output_tokens"].as_u64(),
+                duration_ms: baseline_duration,
+                agent_exit_success: baseline_output.status.success(),
+                acceptance_success: baseline_acceptance,
+                full_suite_success: baseline_suite,
+                mode: format!("{}-single-agent", cli.baseline_client),
+            }
         };
         let start = Instant::now();
         let mut routed_command = Command::new(&router_bin);
@@ -277,7 +381,9 @@ fn main() -> Result<(), String> {
                 source_ref: &manifest.source_ref,
                 task_prompt: &task.prompt,
                 file: &task.file,
-                baseline_model: &manifest.baseline_model,
+                baseline_model,
+                baseline_client: &cli.baseline_client,
+                baseline_reused: cli.baseline_results.is_some(),
                 routed_model: &manifest.patch_model,
                 baseline,
                 routed,
@@ -312,4 +418,20 @@ fn main() -> Result<(), String> {
         serde_json::json!({"run_dir":run_dir,"summary":report})
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixture_mutation_rejects_parent_traversal() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("fixture");
+        fs::create_dir(&root).unwrap();
+        let outside = parent.path().join("outside.rs");
+        fs::write(&outside, "safe").unwrap();
+        assert!(mutate(&root, "../outside.rs", "safe", "broken", "case").is_err());
+        assert_eq!(fs::read_to_string(outside).unwrap(), "safe");
+    }
 }

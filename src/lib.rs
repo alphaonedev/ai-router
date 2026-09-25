@@ -51,6 +51,8 @@ pub struct PatchConfig {
     pub enabled: bool,
     #[serde(default = "default_patch_model")]
     pub model: String,
+    #[serde(default)]
+    pub retry_model: Option<String>,
     #[serde(default = "default_patch_file_bytes")]
     pub max_file_bytes: usize,
     #[serde(default = "default_patch_attempts")]
@@ -70,6 +72,7 @@ impl Default for PatchConfig {
         Self {
             enabled: false,
             model: default_patch_model(),
+            retry_model: None,
             max_file_bytes: default_patch_file_bytes(),
             max_attempts: default_patch_attempts(),
         }
@@ -213,6 +216,13 @@ pub struct OpenRouterResult {
 }
 fn checked_api_url(base: &str) -> Result<String, String> {
     let url = url::Url::parse(base).map_err(|e| e.to_string())?;
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("API base URL cannot contain credentials, query, or fragment".into());
+    }
     let loopback = matches!(
         url.host_str(),
         Some("127.0.0.1" | "localhost" | "::1" | "[::1]")
@@ -234,6 +244,7 @@ pub fn openrouter_chat(
     let base = checked_api_url(&cfg.base_url)?;
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(120)))
+        .max_redirects(0)
         .build()
         .into();
     let body = serde_json::json!({"model":model,"messages":[{"role":"user","content":task}],"stream":false,"usage":{"include":true}});
@@ -249,7 +260,7 @@ pub fn openrouter_chat(
         .map_err(|e| e.to_string())?;
     let content = response["choices"][0]["message"]["content"]
         .as_str()
-        .ok_or("OpenRouter response has no text content")?
+        .unwrap_or_default()
         .to_string();
     Ok(OpenRouterResult {
         model: response["model"].as_str().unwrap_or(model).to_string(),
@@ -263,6 +274,7 @@ pub fn openrouter_models(cfg: &OpenRouterConfig) -> Result<Vec<String>, String> 
     let base = checked_api_url(&cfg.base_url)?;
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(15)))
+        .max_redirects(0)
         .build()
         .into();
     let response: serde_json::Value = agent
@@ -335,9 +347,11 @@ pub struct SavingsReport {
     pub tasks: usize,
     pub baseline_compute: f64,
     pub routed_compute: f64,
+    pub saved_compute: f64,
     pub regain_fraction: f64,
     pub baseline_failures: usize,
     pub routed_failures: usize,
+    pub quality_parity: bool,
     pub target_met: bool,
 }
 pub fn savings(records: &[Measurement]) -> Result<SavingsReport, String> {
@@ -357,17 +371,29 @@ pub fn savings(records: &[Measurement]) -> Result<SavingsReport, String> {
         return Err("baseline compute must be positive".into());
     }
     let routed_compute: f64 = records.iter().map(|r| r.routed_compute).sum();
+    if !baseline_compute.is_finite() || !routed_compute.is_finite() {
+        return Err("aggregate compute values must be finite".into());
+    }
     let baseline_failures = records.iter().filter(|r| !r.baseline_success).count();
     let routed_failures = records.iter().filter(|r| !r.routed_success).count();
-    let regain_fraction = 1.0 - routed_compute / baseline_compute;
+    let quality_parity = records
+        .iter()
+        .all(|r| !r.baseline_success || r.routed_success);
+    let ratio = routed_compute / baseline_compute;
+    if !ratio.is_finite() {
+        return Err("compute ratio must be finite".into());
+    }
+    let regain_fraction = 1.0 - ratio;
     Ok(SavingsReport {
         tasks: records.len(),
         baseline_compute,
         routed_compute,
+        saved_compute: baseline_compute - routed_compute,
         regain_fraction,
         baseline_failures,
         routed_failures,
-        target_met: regain_fraction >= 0.5 && routed_failures <= baseline_failures,
+        quality_parity,
+        target_met: regain_fraction >= 0.5 && quality_parity,
     })
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -430,35 +456,30 @@ pub fn normalize(task: &str) -> String {
 }
 pub fn cache_key(req: &Request, cfg: &Config) -> String {
     let mut h = Sha256::new();
-    h.update(format!(
-        "{}|{}|{}|{:?}|{}|{}|{:?}|{:?}|{}|{}|{}|{}",
-        cfg.policy_version,
-        req.client,
-        normalize(&req.task),
-        req.min_tier,
-        req.high_stakes,
-        req.offline,
-        cfg.models.get(&req.client).map(|m| m
-            .iter()
-            .map(|x| (&x.id, x.tier, &x.effort, &x.description))
-            .collect::<Vec<_>>()),
-        cfg.jev.enabled,
-        cfg.jev.min_confidence,
-        cfg.paw.enabled,
-        cfg.paw.slug,
-        cfg.paw.local_dir
-    ));
-    h.update(format!(
-        "|{}|{}|{}|{}|{}|{}|{}|{}",
-        cfg.decision_service.name,
-        cfg.decision_service.enabled,
-        cfg.decision_service.base_url,
-        cfg.decision_service.model,
-        cfg.decision_service.path,
-        cfg.decision_service.min_margin,
-        cfg.openrouter.base_url,
-        cfg.openrouter.api_key_env
-    ));
+    h.update(
+        serde_json::json!({
+            "policy_version": cfg.policy_version,
+            "default": cfg.default,
+            "client": req.client,
+            "task": normalize(&req.task),
+            "min_tier": req.min_tier,
+            "high_stakes": req.high_stakes,
+            "offline": req.offline,
+            "models": cfg.models.get(&req.client),
+            "jev_enabled": cfg.jev.enabled,
+            "jev_min_confidence_bits": cfg.jev.min_confidence.to_bits(),
+            "paw": cfg.paw,
+            "decision_service_name": cfg.decision_service.name,
+            "decision_service_enabled": cfg.decision_service.enabled,
+            "decision_service_url": cfg.decision_service.base_url,
+            "decision_service_model": cfg.decision_service.model,
+            "decision_service_path": cfg.decision_service.path,
+            "decision_service_margin_bits": cfg.decision_service.min_margin.to_bits(),
+            "openrouter": cfg.openrouter,
+        })
+        .to_string()
+        .as_bytes(),
+    );
     hex::encode(h.finalize())
 }
 pub fn classify(task: &str) -> Tier {
@@ -491,13 +512,20 @@ pub fn classify(task: &str) -> Tier {
         "boilerplate",
         "comment",
     ];
-    if deep.iter().any(|s| t.contains(s)) {
+    if deep.iter().any(|s| contains_keyword(&t, s)) {
         Tier::Deep
-    } else if fast.iter().any(|s| t.contains(s)) && t.len() < 400 {
+    } else if fast.iter().any(|s| contains_keyword(&t, s)) && t.len() < 400 {
         Tier::Fast
     } else {
         Tier::Balanced
     }
+}
+fn contains_keyword(task: &str, keyword: &str) -> bool {
+    task.match_indices(keyword).any(|(start, _)| {
+        let before = task[..start].chars().next_back();
+        let after = task[start + keyword.len()..].chars().next();
+        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+    })
 }
 fn choose(models: &[Model], floor: Tier) -> Option<&Model> {
     models
@@ -541,11 +569,15 @@ fn now() -> u64 {
         .as_secs()
 }
 fn jev_choice(req: &Request, models: &[Model], min_confidence: f64) -> Result<String, String> {
+    if !(0.0..=1.0).contains(&min_confidence) {
+        return Err("Jev min_confidence must be in [0,1]".into());
+    }
     let key = std::env::var("JEV_API_KEY").map_err(|_| "JEV_API_KEY unset".to_string())?;
     let candidates: Vec<_> = models.iter().map(|m| serde_json::json!({"id":m.id,"description":m.description,"cost": match m.tier {Tier::Fast=>"low",Tier::Balanced=>"medium",Tier::Deep=>"high"}})).collect();
     let body = serde_json::json!({"task":req.task,"candidates":candidates,"priorities":["quality","cost","latency"],"stakes":if req.high_stakes {"high"} else {"normal"}});
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(3)))
+        .max_redirects(0)
         .build()
         .into();
     let response: serde_json::Value = agent
@@ -563,7 +595,7 @@ fn jev_choice(req: &Request, models: &[Model], min_confidence: f64) -> Result<St
     let confidence = data["confidence"]
         .as_f64()
         .ok_or("Jev confidence missing")?;
-    if confidence < min_confidence {
+    if !(0.0..=1.0).contains(&confidence) || confidence < min_confidence {
         return Err("Jev confidence below threshold".into());
     }
     let id = data["decision"].as_str().ok_or("Jev decision missing")?;
@@ -608,6 +640,7 @@ fn system_one_choice(req: &Request, cfg: &DecisionServiceConfig) -> Result<Optio
     }
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(3)))
+        .max_redirects(0)
         .build()
         .into();
     let response: serde_json::Value = agent
@@ -621,7 +654,7 @@ fn system_one_choice(req: &Request, cfg: &DecisionServiceConfig) -> Result<Optio
     let margin = answer["confidence"]
         .as_f64()
         .ok_or("decision service confidence missing")?;
-    if !margin.is_finite() || margin < cfg.min_margin {
+    if !(0.0..=1.0).contains(&margin) || margin < cfg.min_margin {
         return Err("decision service margin below threshold".into());
     }
     match answer["choice"]
@@ -637,6 +670,9 @@ fn system_one_choice(req: &Request, cfg: &DecisionServiceConfig) -> Result<Optio
 }
 pub fn route(req: &Request, cfg: &Config, cache_dir: Option<&Path>) -> Result<Decision, String> {
     let start = std::time::Instant::now();
+    if req.task.trim().is_empty() {
+        return Err("task required".into());
+    }
     let models = cfg.models.get(&req.client).ok_or("unsupported client")?;
     if models.is_empty() {
         return Err("no models configured".into());
@@ -812,6 +848,23 @@ mod tests {
         assert_eq!(decision.tier, Tier::Balanced);
     }
     #[test]
+    fn confidence_inputs_and_empty_tasks_are_rejected() {
+        let cfg: Config = toml::from_str(include_str!("../router.toml")).unwrap();
+        let req = Request {
+            client: "codex".into(),
+            task: "  ".into(),
+            model: None,
+            min_tier: None,
+            high_stakes: false,
+            offline: true,
+        };
+        assert!(route(&req, &cfg, None).is_err());
+        assert!(jev_choice(&req, &[], f64::NAN).is_err());
+        let mut service = cfg.decision_service;
+        service.base_url = mock_json(r#"{"answers":{"route":{"choice":"fast","confidence":1.5}}}"#);
+        assert!(system_one_choice(&req, &service).is_err());
+    }
+    #[test]
     fn openrouter_chat_uses_selected_model_and_usage() {
         let cfg = OpenRouterConfig {
             base_url: mock_json(
@@ -824,6 +877,18 @@ mod tests {
         assert_eq!(result.prompt_tokens, Some(4));
     }
     #[test]
+    fn openrouter_empty_content_preserves_reported_cost() {
+        let cfg = OpenRouterConfig {
+            base_url: mock_json(
+                r#"{"choices":[{"message":{"content":null}}],"usage":{"cost":0.002}}"#,
+            ),
+            api_key_env: "TEST_KEY".into(),
+        };
+        let result = openrouter_chat(&cfg, "test/model", "hello", "key").unwrap();
+        assert!(result.content.is_empty());
+        assert_eq!(result.cost_usd, Some(0.002));
+    }
+    #[test]
     fn savings_requires_quality_parity() {
         let r = savings(&[Measurement {
             baseline_compute: 100.0,
@@ -834,6 +899,99 @@ mod tests {
         .unwrap();
         assert!(!r.target_met);
         assert!((r.regain_fraction - 0.6).abs() < 1e-9);
+    }
+    #[test]
+    fn equal_failure_counts_do_not_hide_a_new_regression() {
+        let records = [
+            Measurement {
+                baseline_compute: 10.0,
+                routed_compute: 2.0,
+                baseline_success: true,
+                routed_success: false,
+            },
+            Measurement {
+                baseline_compute: 10.0,
+                routed_compute: 2.0,
+                baseline_success: false,
+                routed_success: true,
+            },
+        ];
+        let report = savings(&records).unwrap();
+        assert_eq!(report.baseline_failures, report.routed_failures);
+        assert!(!report.quality_parity);
+        assert!(!report.target_met);
+    }
+    #[test]
+    fn savings_reports_negative_savings_and_rejects_overflow() {
+        let record = Measurement {
+            baseline_compute: 10.0,
+            routed_compute: 12.0,
+            baseline_success: true,
+            routed_success: true,
+        };
+        assert_eq!(
+            savings(std::slice::from_ref(&record))
+                .unwrap()
+                .saved_compute,
+            -2.0
+        );
+        let huge = Measurement {
+            baseline_compute: f64::MAX,
+            routed_compute: f64::MAX,
+            ..record
+        };
+        assert!(savings(&[huge.clone(), huge]).is_err());
+        assert!(savings(&[Measurement {
+            baseline_compute: f64::from_bits(1),
+            routed_compute: f64::MAX,
+            baseline_success: true,
+            routed_success: true,
+        }])
+        .is_err());
+    }
+    #[test]
+    fn cache_key_changes_when_default_tier_changes() {
+        let mut cfg: Config = toml::from_str(include_str!("../router.toml")).unwrap();
+        let req = Request {
+            client: "codex".into(),
+            task: "Implement a normal feature".into(),
+            model: None,
+            min_tier: None,
+            high_stakes: false,
+            offline: true,
+        };
+        let before = cache_key(&req, &cfg);
+        cfg.default = Tier::Deep;
+        assert_ne!(before, cache_key(&req, &cfg));
+    }
+    #[test]
+    fn cache_key_separates_client_and_task_fields() {
+        let mut cfg: Config = toml::from_str(include_str!("../router.toml")).unwrap();
+        cfg.models
+            .insert("codex|a".into(), cfg.models["codex"].clone());
+        let mut req = Request {
+            client: "codex|a".into(),
+            task: "b".into(),
+            model: None,
+            min_tier: None,
+            high_stakes: false,
+            offline: true,
+        };
+        let first = cache_key(&req, &cfg);
+        req.client = "codex".into();
+        req.task = "a|b".into();
+        assert_ne!(first, cache_key(&req, &cfg));
+    }
+    #[test]
+    fn api_url_rejects_embedded_credentials_and_redirect_targets() {
+        for base in [
+            "https://name:secret@example.com/api/v1",
+            "https://example.com/api/v1?to=other",
+            "https://example.com/api/v1#fragment",
+            "http://example.com/api/v1",
+        ] {
+            assert!(checked_api_url(base).is_err(), "{base}");
+        }
     }
     #[test]
     fn precedence_and_risk() {
@@ -851,6 +1009,15 @@ mod tests {
         assert_eq!(route(&r, &cfg, None).unwrap().tier, Tier::Deep);
         r.model = Some("gpt-6-luna".into());
         assert_eq!(route(&r, &cfg, None).unwrap().source, "explicit");
+    }
+    #[test]
+    fn fast_keywords_do_not_match_inside_unrelated_words() {
+        assert_eq!(
+            classify("Implement an information retrieval index"),
+            Tier::Balanced
+        );
+        assert_eq!(classify("Format this file"), Tier::Fast);
+        assert_eq!(classify("Investigate a production incident"), Tier::Deep);
     }
     #[test]
     fn cache_roundtrip() {

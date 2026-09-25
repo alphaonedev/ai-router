@@ -652,6 +652,11 @@ pub fn adaptive(
     {
         let mut feedback = String::new();
         'attempts: for index in 0..cfg.patch.max_attempts {
+            let patch_model = if index > 0 {
+                cfg.patch.retry_model.as_deref().unwrap_or(&cfg.patch.model)
+            } else {
+                &cfg.patch.model
+            };
             eprintln!(
                 "adaptive: bounded OpenRouter patch attempt {} for {} files",
                 index + 1,
@@ -666,7 +671,7 @@ pub fn adaptive(
             let mut complete = true;
             let mut hard_error = false;
             for file in files {
-                match patch::attempt(cfg, &patch_task, cwd, file) {
+                match patch::attempt(cfg, patch_model, &patch_task, cwd, file) {
                     Ok((attempt, patch)) => {
                         patch_cost = patch_cost.zip(attempt.cost_usd).map(|(a, b)| a + b);
                         let patch_role = FusionRole {
@@ -704,11 +709,19 @@ pub fn adaptive(
                 }
             }
             if complete {
-                patch_validation = validate(cfg, cwd)?;
+                patch_validation = match validate(cfg, cwd) {
+                    Ok(results) => results,
+                    Err(error) => {
+                        for patch in applied.into_iter().rev() {
+                            patch.rollback()?;
+                        }
+                        return Err(error);
+                    }
+                };
                 if patch_validation.iter().all(|v| v.success) {
                     let patch_role = FusionRole {
                         client: "openrouter".into(),
-                        model: cfg.patch.model.clone(),
+                        model: patch_model.into(),
                     };
                     event(cache, &run_id, "validation", "passed", &patch_role, None);
                     return Ok(AdaptiveReport {
@@ -728,7 +741,7 @@ pub fn adaptive(
                 }
                 let patch_role = FusionRole {
                     client: "openrouter".into(),
-                    model: cfg.patch.model.clone(),
+                    model: patch_model.into(),
                 };
                 event(cache, &run_id, "validation", "failed", &patch_role, None);
                 feedback = patch_validation
@@ -833,6 +846,9 @@ pub fn adaptive(
 
 pub fn run(cfg: &Config, task: &str, cwd: &Path, cache: Option<&Path>) -> Result<Report, String> {
     dry_plan(cfg, cwd)?;
+    if cfg.fusion.validation.is_empty() {
+        return Err("fusion requires at least one validation command".into());
+    }
     if task.trim().is_empty() {
         return Err("task required".into());
     }
@@ -1311,5 +1327,18 @@ tier = "fast"
             dry_plan(&invalid_sidekick, cwd).expect_err("invalid sidekick should fail"),
             "fusion model missing-sidekick is not allowed for claude"
         );
+    }
+    #[test]
+    fn fusion_does_not_accept_without_validation_commands() {
+        let cfg = config();
+        let error = run(
+            &cfg,
+            "Implement a feature",
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+            None,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error, "fusion requires at least one validation command");
     }
 }

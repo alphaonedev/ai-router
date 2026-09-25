@@ -103,6 +103,9 @@ fn esc(s: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
 }
+fn terminal_text(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).collect()
+}
 fn ago(ts: u64) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -213,7 +216,7 @@ fn terminal(s: &Snapshot) -> String {
     for (m, n) in s.model_counts.iter().take(6) {
         out.push_str(&format!(
             "  {:<24} {:>4}  {}\n",
-            m,
+            terminal_text(m),
             n,
             "█".repeat((n * 24).checked_div(total).unwrap_or(0).max(1))
         ));
@@ -222,10 +225,10 @@ fn terminal(s: &Snapshot) -> String {
     for e in s.events.iter().rev().take(10) {
         out.push_str(&format!(
             "  {:<7} {:<22} {:<9} {:<8} {:>4}ms  {}\n",
-            e.client,
-            e.model,
+            terminal_text(&e.client),
+            terminal_text(&e.model),
             format!("{:?}", e.tier),
-            e.source,
+            terminal_text(&e.source),
             e.duration_ms,
             ago(e.timestamp)
         ));
@@ -237,10 +240,10 @@ fn terminal(s: &Snapshot) -> String {
     for e in s.fusion_events.iter().rev().take(8) {
         out.push_str(&format!(
             "  {:<16} {:<8} {:<22} {:<9} in {:>6} out {:>6}  {}\n",
-            e.stage,
-            e.client,
-            e.model,
-            e.status,
+            terminal_text(&e.stage),
+            terminal_text(&e.client),
+            terminal_text(&e.model),
+            terminal_text(&e.status),
             e.input_tokens.map_or("—".into(), |n| n.to_string()),
             e.output_tokens.map_or("—".into(), |n| n.to_string()),
             ago(e.timestamp)
@@ -272,5 +275,9 @@ mod tests {
         assert!(html.contains("Decision stream"));
         assert!(html.contains("meta http-equiv=\"refresh\""));
         assert!(!html.contains("<script"));
+    }
+    #[test]
+    fn terminal_feed_strips_control_sequences_from_model_names() {
+        assert_eq!(terminal_text("model\x1b[31m\n"), "model[31m");
     }
 }

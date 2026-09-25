@@ -142,10 +142,30 @@ fn launch_plan(
         return Err("unsupported client".into());
     }
     if extra.iter().any(|arg| {
-        ["--model", "-m", "--effort", "--reasoning-effort"].contains(&arg.as_str())
-            || arg.starts_with("--model=")
+        [
+            "--model",
+            "-m",
+            "--effort",
+            "--reasoning-effort",
+            "-c",
+            "--config",
+        ]
+        .contains(&arg.as_str())
+            || [
+                "--model=",
+                "--effort=",
+                "--reasoning-effort=",
+                "--config=",
+                "-cmodel=",
+                "-cmodel_reasoning_effort=",
+            ]
+            .iter()
+            .any(|prefix| arg.starts_with(prefix))
     }) {
-        return Err("model and effort flags must use ai-router options or router.toml".into());
+        return Err(
+            "model, effort and configuration flags must use ai-router options or router.toml"
+                .into(),
+        );
     }
     let mut args = vec!["--model".to_string(), decision.model.clone()];
     if let Some(e) = &decision.effort {
@@ -387,7 +407,7 @@ fn main() -> Result<(), String> {
                     "bytes: {} -> {} ({:.1}% reduction; token count depends on model tokenizer)",
                     raw.len(),
                     encoded.len(),
-                    100.0 * (raw.len() - encoded.len()) as f64 / raw.len() as f64
+                    100.0 * (raw.len() as f64 - encoded.len() as f64) / raw.len() as f64
                 )
             } else {
                 print!("{raw}");
@@ -480,6 +500,9 @@ fn main() -> Result<(), String> {
                 let key = std::env::var(&cfg.openrouter.api_key_env)
                     .map_err(|_| format!("{} unset", cfg.openrouter.api_key_env))?;
                 let result = openrouter_chat(&cfg.openrouter, &d.model, task, &key)?;
+                if result.content.trim().is_empty() {
+                    return Err("OpenRouter response has no text content".into());
+                }
                 println!("{}", result.content);
                 eprintln!(
                     "ai-router: {} ({}); input tokens {:?}, output tokens {:?}",

@@ -2,7 +2,7 @@
 
 Local-first, cost-aware model selection and opt-in lead–sidekick coding workflow for Claude Code CLI, OpenAI Codex CLI, Grok Build CLI, and one-shot OpenRouter API calls. The router, coordinator, adapters, evaluation tools, and optional PAW integration are written in Rust.
 
-**Status:** integration-ready routing baseline. On 25 September 2026, routed fast, balanced, and deep invocations were tested through all three installed CLIs on macOS. The 50%+ realized compute regain target is **not yet demonstrated** on a representative workload.
+**Status:** integration-ready routing baseline. On 25 September 2026, routed fast, balanced, and deep invocations were tested through all three installed CLIs on macOS. A [matched ten-task benchmark](benchmarks/README.md) measured **76.9% lower model-reported cost**, with all ten tasks passing on both paths. This establishes the 50% target for that documented small and medium coding suite, not for every workload or a subscription invoice. See the [security review](SECURITY.md) for operating boundaries and audit findings.
 
 ## Build
 
@@ -40,7 +40,7 @@ Any arguments after `--` are passed to the underlying CLI. Model and effort flag
 
 ### Adaptive entry point
 
-`adaptive` classifies a new task using the configured router. Below `[fusion].min_tier` (default `deep`), it can first ask a low-cost OpenRouter model for bounded exact edits to explicitly named files. The Rust coordinator accepts only exact, unique replacements, validates the combined change, and rolls back every edit if validation fails. `[patch].max_attempts` bounds retries with validation feedback. A rejected edit or unavailable API goes to `[fusion.routine]` (Claude Haiku in the checked-in TOML); failed validation there escalates to the full lead–sidekick workflow. The reported cost includes rejected patch calls and fallbacks. At or above the threshold, it starts Fusion immediately. A green validation command does not prove every behavior; use checks that exercise the task's acceptance criteria.
+`adaptive` classifies a new task using the configured router. Below `[fusion].min_tier` (default `deep`), it can first ask a low-cost OpenRouter model for bounded exact edits to explicitly named files. The Rust coordinator accepts only exact, unique replacements, validates the combined change, and rolls back every edit if validation fails. `[patch].max_attempts` bounds retries with validation feedback; optional `[patch].retry_model` selects a different allowlisted model after the first attempt. A rejected edit or unavailable API goes to `[fusion.routine]` (Claude Haiku in the checked-in TOML); failed validation there escalates to the full lead–sidekick workflow. The reported cost includes rejected patch calls and fallbacks. At or above the threshold, it starts Fusion immediately. A green validation command does not prove every behavior; use checks that exercise the task's acceptance criteria.
 
 ```sh
 ./target/release/ai-router adaptive --task 'Fix the parser test' --dry-run

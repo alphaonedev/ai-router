@@ -14,6 +14,8 @@ export OPENROUTER_API_KEY=your_key
 ./target/release/benchmark
 ```
 
+For a fresh Claude Opus baseline on the same fixtures, use `./target/release/benchmark --baseline-client claude --baseline-model opus`. To compare a changed routing policy without paying for the same baseline calls again, pass `--baseline-results benchmarks/runs/<prior-run>/results.jsonl` with the same client and model. The runner verifies task ID, source reference, prompt, file, model, and successful prior checks; it then creates and validates fresh routed fixtures. Replayed baselines are marked in each result row and copied into the new run directory. Treat this as a paired replay comparison, not another live baseline run.
+
 The runner writes the exact generated TOML, manifest, per-task records, measurements, summary, fixtures, and raw CLI responses under ignored `benchmarks/runs/<uuid>/`. It stops if an injected regression does not fail before repair or if a provider omits a cost, so neither condition can silently improve the savings result. Run `./target/release/ai-router savings benchmarks/runs/<uuid>/measurements.jsonl` to recalculate the aggregate. Use `--start` and `--limit` only for exploratory slices; the published full results use all tasks.
 
 ## Results on 25 September 2026

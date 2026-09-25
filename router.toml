@@ -1,4 +1,4 @@
-policy_version = 5
+policy_version = 6
 default = "balanced"
 
 [fusion]
@@ -51,6 +51,7 @@ api_key_env = "OPENROUTER_API_KEY"
 [patch]
 enabled = true
 model = "google/gemini-3.5-flash-lite"
+retry_model = "google/gemma-4-26b-a4b-it"
 max_file_bytes = 100000
 max_attempts = 2
 

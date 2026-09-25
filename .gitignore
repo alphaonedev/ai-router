@@ -3,3 +3,4 @@
 .env
 router.local.toml
 /benchmarks/runs/
+/.codegraph/
