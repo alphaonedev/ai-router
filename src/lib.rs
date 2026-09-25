@@ -53,6 +53,8 @@ pub struct PatchConfig {
     pub model: String,
     #[serde(default = "default_patch_file_bytes")]
     pub max_file_bytes: usize,
+    #[serde(default = "default_patch_attempts")]
+    pub max_attempts: u8,
 }
 fn default_patch_model() -> String {
     "google/gemini-3.5-flash-lite".into()
@@ -60,12 +62,16 @@ fn default_patch_model() -> String {
 fn default_patch_file_bytes() -> usize {
     20_000
 }
+fn default_patch_attempts() -> u8 {
+    2
+}
 impl Default for PatchConfig {
     fn default() -> Self {
         Self {
             enabled: false,
             model: default_patch_model(),
             max_file_bytes: default_patch_file_bytes(),
+            max_attempts: default_patch_attempts(),
         }
     }
 }

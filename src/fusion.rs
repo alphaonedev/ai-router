@@ -50,6 +50,7 @@ pub struct AdaptiveReport {
     pub validation: Vec<ValidationResult>,
     pub fusion: Option<Report>,
     pub patch: Option<PatchAttempt>,
+    pub patch_attempts: Vec<PatchAttempt>,
     pub patch_validation: Vec<ValidationResult>,
     pub total_cost_usd: Option<f64>,
     pub duration_ms: u128,
@@ -578,6 +579,9 @@ pub fn dry_plan(cfg: &Config, cwd: &Path) -> Result<Value, String> {
 
 pub fn adaptive_plan(cfg: &Config, cwd: &Path, tier: Tier) -> Result<Value, String> {
     dry_plan(cfg, cwd)?;
+    if !(1..=3).contains(&cfg.patch.max_attempts) {
+        return Err("patch max_attempts must be 1..3".into());
+    }
     let routine = cfg.fusion.routine.as_ref().unwrap_or(&cfg.fusion.sidekick);
     model(cfg, routine)?;
     if tier < cfg.fusion.min_tier && cfg.fusion.validation.is_empty() {
@@ -623,58 +627,93 @@ pub fn adaptive(
             validation: Vec::new(),
             fusion: Some(report),
             patch: None,
+            patch_attempts: Vec::new(),
             patch_validation: Vec::new(),
         });
     }
     let mut patch_record = None;
+    let mut patch_attempts = Vec::new();
+    let mut patch_cost = Some(0.0);
     let mut patch_validation = Vec::new();
     if let Some(file) = file.filter(|_| {
         !offline && cfg.patch.enabled && std::env::var(&cfg.openrouter.api_key_env).is_ok()
     }) {
-        eprintln!("adaptive: bounded OpenRouter patch for {}", file.display());
-        match patch::attempt(cfg, task, cwd, file) {
-            Ok((attempt, applied)) => {
-                let patch_cost = attempt.cost_usd;
-                let patch_role = FusionRole {
-                    client: "openrouter".into(),
-                    model: attempt.model.clone(),
-                };
-                event(
-                    cache,
-                    &run_id,
-                    "patch",
-                    if attempt.applied {
-                        "applied"
-                    } else {
-                        "rejected"
-                    },
-                    &patch_role,
-                    None,
-                );
-                patch_record = Some(attempt);
-                if let Some(applied) = applied {
-                    patch_validation = validate(cfg, cwd)?;
-                    if patch_validation.iter().all(|v| v.success) {
-                        event(cache, &run_id, "validation", "passed", &patch_role, None);
-                        return Ok(AdaptiveReport {
-                            run_id,
-                            mode: "openrouter_patch".into(),
-                            outcome: "validated".into(),
-                            classification_tier: tier,
-                            phases: Vec::new(),
-                            validation: patch_validation,
-                            patch_validation: Vec::new(),
-                            fusion: None,
-                            total_cost_usd: patch_cost,
-                            duration_ms: start.elapsed().as_millis(),
-                            patch: patch_record,
-                        });
+        let mut feedback = String::new();
+        for index in 0..cfg.patch.max_attempts {
+            eprintln!(
+                "adaptive: bounded OpenRouter patch attempt {} for {}",
+                index + 1,
+                file.display()
+            );
+            let patch_task = if feedback.is_empty() {
+                task.to_string()
+            } else {
+                format!("{task}\n\nThe previous exact-edit attempt failed. Correct it using this feedback:\n{feedback}")
+            };
+            match patch::attempt(cfg, &patch_task, cwd, file) {
+                Ok((attempt, applied)) => {
+                    patch_cost = patch_cost.zip(attempt.cost_usd).map(|(a, b)| a + b);
+                    let patch_role = FusionRole {
+                        client: "openrouter".into(),
+                        model: attempt.model.clone(),
+                    };
+                    event(
+                        cache,
+                        &run_id,
+                        "patch",
+                        if attempt.applied {
+                            "applied"
+                        } else {
+                            "rejected"
+                        },
+                        &patch_role,
+                        None,
+                    );
+                    feedback = attempt.reason.clone();
+                    patch_record = Some(attempt.clone());
+                    patch_attempts.push(attempt);
+                    if let Some(applied) = applied {
+                        patch_validation = validate(cfg, cwd)?;
+                        if patch_validation.iter().all(|v| v.success) {
+                            event(cache, &run_id, "validation", "passed", &patch_role, None);
+                            return Ok(AdaptiveReport {
+                                run_id,
+                                mode: "openrouter_patch".into(),
+                                outcome: "validated".into(),
+                                classification_tier: tier,
+                                phases: Vec::new(),
+                                validation: patch_validation,
+                                patch_validation: Vec::new(),
+                                fusion: None,
+                                total_cost_usd: patch_cost,
+                                duration_ms: start.elapsed().as_millis(),
+                                patch: patch_record,
+                                patch_attempts,
+                            });
+                        }
+                        event(cache, &run_id, "validation", "failed", &patch_role, None);
+                        applied.rollback()?;
+                        feedback = patch_validation
+                            .iter()
+                            .filter(|v| !v.success)
+                            .map(|v| v.output_tail.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        feedback = feedback
+                            .chars()
+                            .rev()
+                            .take(3000)
+                            .collect::<String>()
+                            .chars()
+                            .rev()
+                            .collect();
                     }
-                    event(cache, &run_id, "validation", "failed", &patch_role, None);
-                    applied.rollback()?;
+                }
+                Err(error) => {
+                    eprintln!("adaptive: patch skipped: {error}");
+                    break;
                 }
             }
-            Err(error) => eprintln!("adaptive: patch skipped: {error}"),
         }
     }
     let session = uuid::Uuid::new_v4().to_string();
@@ -713,9 +752,10 @@ pub fn adaptive(
         None,
     );
     let cost = work.phase.cost_usd;
-    let total_cost = match &patch_record {
-        Some(p) => p.cost_usd.zip(cost).map(|(a, b)| a + b),
-        None => cost,
+    let total_cost = if patch_attempts.is_empty() {
+        cost
+    } else {
+        patch_cost.zip(cost).map(|(a, b)| a + b)
     };
     if passed {
         event(cache, &run_id, "outcome", "validated", routine, None);
@@ -730,6 +770,7 @@ pub fn adaptive(
             total_cost_usd: total_cost,
             duration_ms: start.elapsed().as_millis(),
             patch: patch_record,
+            patch_attempts,
             patch_validation,
         });
     }
@@ -747,6 +788,7 @@ pub fn adaptive(
         duration_ms: start.elapsed().as_millis(),
         fusion: Some(report),
         patch: patch_record,
+        patch_attempts,
         patch_validation,
     })
 }

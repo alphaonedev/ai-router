@@ -6,7 +6,7 @@ use std::{
     time::Instant,
 };
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct PatchAttempt {
     pub model: String,
     pub file: String,

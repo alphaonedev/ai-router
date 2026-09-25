@@ -1,4 +1,4 @@
-policy_version = 4
+policy_version = 5
 default = "balanced"
 
 [fusion]
@@ -52,6 +52,7 @@ api_key_env = "OPENROUTER_API_KEY"
 enabled = true
 model = "google/gemini-3.5-flash-lite"
 max_file_bytes = 100000
+max_attempts = 2
 
 [[models.claude]]
 id = "haiku"

@@ -17,6 +17,8 @@ struct Cli {
     output_dir: PathBuf,
     #[arg(long)]
     limit: Option<usize>,
+    #[arg(long, default_value_t = 0)]
+    start: usize,
 }
 
 #[derive(Deserialize)]
@@ -135,6 +137,10 @@ fn main() -> Result<(), String> {
         client: "grok".into(),
         model: manifest.baseline_model.clone(),
     };
+    cfg.fusion.sidekick = FusionRole {
+        client: "claude".into(),
+        model: "haiku".into(),
+    };
     cfg.fusion.validation = vec![FusionValidation {
         program: "cargo".into(),
         args: vec!["test".into(), "-q".into()],
@@ -149,7 +155,11 @@ fn main() -> Result<(), String> {
     let mut results = fs::File::create(run_dir.join("results.jsonl")).map_err(|e| e.to_string())?;
     let mut savings_file =
         fs::File::create(run_dir.join("measurements.jsonl")).map_err(|e| e.to_string())?;
-    let tasks = manifest.tasks.iter().take(cli.limit.unwrap_or(usize::MAX));
+    let tasks = manifest
+        .tasks
+        .iter()
+        .skip(cli.start)
+        .take(cli.limit.unwrap_or(usize::MAX));
     for task in tasks {
         eprintln!("benchmark: {}", task.id);
         let task_dir = run_dir.join(&task.id);
