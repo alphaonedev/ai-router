@@ -40,16 +40,17 @@ Any arguments after `--` are passed to the underlying CLI. Model and effort flag
 
 ### Adaptive entry point
 
-`adaptive` classifies a new task using the configured router. Below `[fusion].min_tier` (default `deep`), it can first ask a low-cost OpenRouter model for one exact edit to a specified file. The Rust coordinator accepts only an exact, unique replacement inside that file, runs every configured validation command, and rolls back if validation fails. A rejected edit or unavailable API goes to `[fusion.routine]` (Claude Haiku in the checked-in TOML); failed validation there escalates to the full lead–sidekick workflow. The reported cost includes rejected patch calls and fallbacks. At or above the threshold, it starts Fusion immediately. A green validation command does not prove every behavior; use checks that exercise the task's acceptance criteria.
+`adaptive` classifies a new task using the configured router. Below `[fusion].min_tier` (default `deep`), it can first ask a low-cost OpenRouter model for bounded exact edits to explicitly named files. The Rust coordinator accepts only exact, unique replacements, validates the combined change, and rolls back every edit if validation fails. `[patch].max_attempts` bounds retries with validation feedback. A rejected edit or unavailable API goes to `[fusion.routine]` (Claude Haiku in the checked-in TOML); failed validation there escalates to the full lead–sidekick workflow. The reported cost includes rejected patch calls and fallbacks. At or above the threshold, it starts Fusion immediately. A green validation command does not prove every behavior; use checks that exercise the task's acceptance criteria.
 
 ```sh
 ./target/release/ai-router adaptive --task 'Fix the parser test' --dry-run
 ./target/release/ai-router adaptive --task 'Fix the parser test' --workdir .
 ./target/release/ai-router adaptive --task 'Fix the parser test' --file src/parser.rs --workdir .
+./target/release/ai-router adaptive --task 'Fix the CLI and core floor' --file src/main.rs --file src/lib.rs --workdir .
 ./target/release/ai-router adaptive --task 'Investigate a production race condition' --high-stakes --workdir .
 ```
 
-The classifier decision and the execution path are shown in the dry run. `--file` must be a relative path inside `--workdir`; no file is sent to OpenRouter without it. `--offline` skips the OpenRouter patch and limits optional decision services, though the selected coding CLI still uses its own model service. `min_tier`, roles, and validation commands are TOML settings. The checked-in `[patch]` is enabled but activates only when `OPENROUTER_API_KEY` exists. For cost comparisons, include failed patch calls, single-agent attempts, and escalations.
+The classifier decision and the execution path are shown in the dry run. Each `--file` must be a unique relative path inside `--workdir`, with at most four files; no file is sent to OpenRouter without it. `--offline` skips the OpenRouter patch and limits optional decision services, though the selected coding CLI still uses its own model service. `min_tier`, roles, and validation commands are TOML settings. The checked-in `[patch]` is enabled but activates only when `OPENROUTER_API_KEY` exists. For cost comparisons, include failed patch calls, single-agent attempts, and escalations.
 
 Inspired by [Cognition's Local Fusion architecture](https://cognition.com/blog/local-fusion), `fusion` runs a lead planning phase, a sidekick implementation phase, local validation, and a lead review. The lead works in an isolated copy of Git-tracked and nonignored untracked files, refreshed before review; the sidekick works in the original repository. The copy prevents accidental relative-path writes by the lead from changing original files; it is not an OS security sandbox for absolute paths or external tools. The lead and sidekick keep separate resumable CLI sessions on fixed models. A review requesting changes sends bounded feedback to the same sidekick session, then returns to the same lead session. Roles, handoff size, correction limit, per-phase timeout, and validation commands live in `[fusion]`, `[fusion.lead]`, `[fusion.sidekick]`, and `[[fusion.validation]]` in `router.toml`. Validation commands run by the Rust coordinator in the workdir and must pass before acceptance. The selected models must be in the relevant allowlists. The lead's `DECISION: ACCEPT` is an agent review result, not a substitute for independent validation.
 
@@ -145,7 +146,7 @@ Record matched baseline and routed runs as JSONL with `baseline_compute`, `route
 ./target/release/ai-router savings examples/measurements.jsonl
 ```
 
-`savings` computes `1 - routed_compute / baseline_compute`; it marks the 50% target met only if regain is at least 0.5 and routed failures do not exceed baseline failures. The checked-in file is an illustration, not evidence of project savings. A representative shadow and live comparison remains necessary before claiming 50% in production.
+`savings` computes `1 - routed_compute / baseline_compute`; it marks the 50% target met only if regain is at least 0.5 and routed failures do not exceed baseline failures. The `examples/measurements.jsonl` file is illustrative. The reproducible [ten-task ai-router coding benchmark](benchmarks/README.md) measured **76.9% lower provider-reported cost** with 0 failures on either path, including rejected edits and fallback calls. The suite includes policy and CLI repairs, a new feature, and a two-file repair. This establishes the target for that documented workload; broader production and subscription savings remain unmeasured.
 
 ### Measured Fusion smoke test
 

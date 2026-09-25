@@ -1,0 +1,9 @@
+{
+  "tasks": 6,
+  "baseline_compute": 0.65405596,
+  "routed_compute": 0.0845858,
+  "regain_fraction": 0.8706749801653058,
+  "baseline_failures": 0,
+  "routed_failures": 0,
+  "target_met": true
+}

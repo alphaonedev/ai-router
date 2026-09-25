@@ -1,0 +1,216 @@
+source_ref = "730de44"
+baseline_model = "grok-4.7"
+patch_model = "google/gemini-3.5-flash-lite"
+
+[[tasks]]
+id = "savings-boundary"
+file = "src/lib.rs"
+prompt = "Fix the regression in src/lib.rs: exactly 50% compute regain with equal quality must meet the savings target. Run the Rust tests."
+healthy = "regain_fraction >= 0.5 && routed_failures <= baseline_failures"
+broken = "regain_fraction > 0.5 && routed_failures <= baseline_failures"
+test = '''
+use ai_router::{savings, Measurement};
+#[test]
+fn regression() {
+    let report = savings(&[Measurement { baseline_compute: 100.0, routed_compute: 50.0, baseline_success: true, routed_success: true }]).unwrap();
+    assert!(report.target_met);
+}
+'''
+
+[[tasks]]
+id = "whitespace-normalization"
+file = "src/lib.rs"
+prompt = "Fix the regression in src/lib.rs: task normalization must collapse tabs, newlines, and spaces before lowercasing. Run the Rust tests."
+healthy = "task.split_whitespace()"
+broken = "task.split(' ')"
+test = '''
+use ai_router::normalize;
+#[test]
+fn regression() {
+    assert_eq!(normalize("  A\tB\n C  "), "a b c");
+}
+'''
+
+[[tasks]]
+id = "cache-policy-version"
+file = "src/lib.rs"
+prompt = "Fix the regression in src/lib.rs: changing policy_version must change the routing cache key. Run the Rust tests."
+healthy = "        cfg.policy_version,\n        req.client,"
+broken = "        0,\n        req.client,"
+test = '''
+use ai_router::{cache_key, Config, Request};
+#[test]
+fn regression() {
+    let mut config: Config = toml::from_str(include_str!("../router.toml")).unwrap();
+    let request = Request { client: "codex".into(), task: "fix a parser".into(), model: None, min_tier: None, high_stakes: false, offline: true };
+    let before = cache_key(&request, &config);
+    config.policy_version += 1;
+    assert_ne!(before, cache_key(&request, &config));
+}
+'''
+
+[[tasks]]
+id = "high-stakes-floor"
+file = "src/lib.rs"
+prompt = "Fix the regression in src/lib.rs: high_stakes requests must receive the deep routing floor. Run the Rust tests."
+healthy = "let floor = if req.high_stakes {"
+broken = "let floor = if false && req.high_stakes {"
+test = '''
+use ai_router::{route, Config, Request, Tier};
+#[test]
+fn regression() {
+    let config: Config = toml::from_str(include_str!("../router.toml")).unwrap();
+    let request = Request { client: "codex".into(), task: "fix a parser".into(), model: None, min_tier: None, high_stakes: true, offline: true };
+    assert_eq!(route(&request, &config, None).unwrap().tier, Tier::Deep);
+}
+'''
+
+[[tasks]]
+id = "fast-task-cutoff"
+file = "src/lib.rs"
+prompt = "Fix the regression in src/lib.rs: a short task with a fast keyword should classify fast, while a long task should remain balanced. Run the Rust tests."
+healthy = "&& t.len() < 400"
+broken = "&& t.len() > 400"
+test = '''
+use ai_router::{classify, Tier};
+#[test]
+fn regression() {
+    assert_eq!(classify("summarize this"), Tier::Fast);
+    assert_eq!(classify(&format!("summarize {}", "x".repeat(450))), Tier::Balanced);
+}
+'''
+
+[[tasks]]
+id = "toon-shorter-only"
+file = "src/main.rs"
+prompt = "Fix the regression in src/main.rs: the toon command should keep the original JSON when the TOON encoding is longer. Run the Rust tests."
+healthy = "if encoded.len() < raw.len() || *force {"
+broken = "if encoded.len() > raw.len() || *force {"
+test = '''
+use std::{fs, process::Command};
+#[test]
+fn regression() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("input.json");
+    fs::write(&path, "[]").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ai-router")).args(["toon", "--input", path.to_str().unwrap()]).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "[]");
+}
+'''
+
+[[tasks]]
+id = "explicit-model-override"
+file = "src/lib.rs"
+prompt = "Restore explicit model selection in src/lib.rs: an allowlisted model ID must take priority over routing floors, and an unknown ID must return an error. Run the Rust tests."
+healthy = '''
+    if let Some(id) = &req.model {
+        let m = models
+            .iter()
+            .find(|m| &m.id == id)
+            .ok_or("explicit model unavailable")?;
+        let decision = Decision {
+            model: m.id.clone(),
+            tier: m.tier,
+            effort: m.effort.clone(),
+            source: "explicit".into(),
+            reason: "caller selected model".into(),
+            duration_ms: start.elapsed().as_millis(),
+        };
+        record_event(req, cfg, cache_dir, &decision);
+        return Ok(decision);
+    }
+'''
+broken = "    let _ = &req.model;\n"
+test = '''
+use ai_router::{route, Config, Request, Tier};
+#[test]
+fn regression() {
+    let config: Config = toml::from_str(include_str!("../router.toml")).unwrap();
+    let mut request = Request { client: "codex".into(), task: "fix a parser".into(), model: Some("gpt-6-luna".into()), min_tier: None, high_stakes: true, offline: true };
+    let decision = route(&request, &config, None).unwrap();
+    assert_eq!(decision.model, "gpt-6-luna");
+    assert_eq!(decision.tier, Tier::Fast);
+    assert_eq!(decision.source, "explicit");
+    request.model = Some("unknown-model".into());
+    assert!(route(&request, &config, None).is_err());
+}
+'''
+
+[[tasks]]
+id = "invalid-compute-rejection"
+file = "src/lib.rs"
+prompt = "Restore input validation in src/lib.rs savings(): reject NaN, infinity, and negative compute values before calculating regain. Run the Rust tests."
+healthy = '''
+    if records.iter().any(|r| {
+        !r.baseline_compute.is_finite()
+            || !r.routed_compute.is_finite()
+            || r.baseline_compute < 0.0
+            || r.routed_compute < 0.0
+    }) {
+        return Err("compute values must be finite and nonnegative".into());
+    }
+'''
+broken = ""
+test = '''
+use ai_router::{savings, Measurement};
+#[test]
+fn regression() {
+    for invalid in [f64::NAN, f64::INFINITY, -1.0] {
+        let record = Measurement { baseline_compute: 10.0, routed_compute: invalid, baseline_success: true, routed_success: true };
+        assert!(savings(&[record]).is_err());
+    }
+}
+'''
+
+[[tasks]]
+id = "saved-compute-feature"
+file = "src/lib.rs"
+prompt = "Add a public saved_compute field to SavingsReport in src/lib.rs. It must equal baseline_compute minus routed_compute, including a negative value when routing costs more. Run the Rust tests."
+test = '''
+use ai_router::{savings, Measurement};
+#[test]
+fn regression() {
+    for (routed, expected) in [(6.0, 4.0), (12.0, -2.0)] {
+        let report = savings(&[Measurement { baseline_compute: 10.0, routed_compute: routed, baseline_success: true, routed_success: true }]).unwrap();
+        assert_eq!(report.saved_compute, expected);
+    }
+}
+'''
+
+[[tasks]]
+id = "minimum-tier-across-cli-and-core"
+file = "src/main.rs"
+prompt = "Fix the min-tier floor in both src/main.rs adaptive CLI and src/lib.rs routing core. An adaptive dry run with --min-tier deep and a direct route request with min_tier=deep must select the deep tier. Run the Rust tests."
+healthy = '''
+                client: cfg.fusion.lead.client.clone(),
+                task: task.clone(),
+                model: None,
+                min_tier: tier(min_tier.clone())?,
+'''
+broken = '''
+                client: cfg.fusion.lead.client.clone(),
+                task: task.clone(),
+                model: None,
+                min_tier: None,
+'''
+extra_file = "src/lib.rs"
+extra_healthy = "req.min_tier.unwrap_or(Tier::Fast)"
+extra_broken = "Tier::Fast"
+test = '''
+use ai_router::{route, Config, Request, Tier};
+use std::process::Command;
+#[test]
+fn regression() {
+    let config: Config = toml::from_str(include_str!("../router.toml")).unwrap();
+    let request = Request { client: "codex".into(), task: "fix parser".into(), model: None, min_tier: Some(Tier::Deep), high_stakes: false, offline: true };
+    assert_eq!(route(&request, &config, None).unwrap().tier, Tier::Deep);
+    let output = Command::new(env!("CARGO_BIN_EXE_ai-router"))
+        .args(["adaptive", "--task", "fix parser", "--min-tier", "deep", "--dry-run"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output().unwrap();
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["routing"]["tier"], "deep");
+}
+'''

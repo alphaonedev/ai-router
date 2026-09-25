@@ -1,0 +1,100 @@
+source_ref = "730de44"
+baseline_model = "grok-4.7"
+patch_model = "google/gemini-3.5-flash-lite"
+
+[[tasks]]
+id = "savings-boundary"
+file = "src/lib.rs"
+prompt = "Fix the regression in src/lib.rs: exactly 50% compute regain with equal quality must meet the savings target. Run the Rust tests."
+healthy = "regain_fraction >= 0.5 && routed_failures <= baseline_failures"
+broken = "regain_fraction > 0.5 && routed_failures <= baseline_failures"
+test = '''
+use ai_router::{savings, Measurement};
+#[test]
+fn regression() {
+    let report = savings(&[Measurement { baseline_compute: 100.0, routed_compute: 50.0, baseline_success: true, routed_success: true }]).unwrap();
+    assert!(report.target_met);
+}
+'''
+
+[[tasks]]
+id = "whitespace-normalization"
+file = "src/lib.rs"
+prompt = "Fix the regression in src/lib.rs: task normalization must collapse tabs, newlines, and spaces before lowercasing. Run the Rust tests."
+healthy = "task.split_whitespace()"
+broken = "task.split(' ')"
+test = '''
+use ai_router::normalize;
+#[test]
+fn regression() {
+    assert_eq!(normalize("  A\tB\n C  "), "a b c");
+}
+'''
+
+[[tasks]]
+id = "cache-policy-version"
+file = "src/lib.rs"
+prompt = "Fix the regression in src/lib.rs: changing policy_version must change the routing cache key. Run the Rust tests."
+healthy = "        cfg.policy_version,\n        req.client,"
+broken = "        0,\n        req.client,"
+test = '''
+use ai_router::{cache_key, Config, Request};
+#[test]
+fn regression() {
+    let mut config: Config = toml::from_str(include_str!("../router.toml")).unwrap();
+    let request = Request { client: "codex".into(), task: "fix a parser".into(), model: None, min_tier: None, high_stakes: false, offline: true };
+    let before = cache_key(&request, &config);
+    config.policy_version += 1;
+    assert_ne!(before, cache_key(&request, &config));
+}
+'''
+
+[[tasks]]
+id = "high-stakes-floor"
+file = "src/lib.rs"
+prompt = "Fix the regression in src/lib.rs: high_stakes requests must receive the deep routing floor. Run the Rust tests."
+healthy = "let floor = if req.high_stakes {"
+broken = "let floor = if false && req.high_stakes {"
+test = '''
+use ai_router::{route, Config, Request, Tier};
+#[test]
+fn regression() {
+    let config: Config = toml::from_str(include_str!("../router.toml")).unwrap();
+    let request = Request { client: "codex".into(), task: "fix a parser".into(), model: None, min_tier: None, high_stakes: true, offline: true };
+    assert_eq!(route(&request, &config, None).unwrap().tier, Tier::Deep);
+}
+'''
+
+[[tasks]]
+id = "fast-task-cutoff"
+file = "src/lib.rs"
+prompt = "Fix the regression in src/lib.rs: a short task with a fast keyword should classify fast, while a long task should remain balanced. Run the Rust tests."
+healthy = "&& t.len() < 400"
+broken = "&& t.len() > 400"
+test = '''
+use ai_router::{classify, Tier};
+#[test]
+fn regression() {
+    assert_eq!(classify("summarize this"), Tier::Fast);
+    assert_eq!(classify(&format!("summarize {}", "x".repeat(450))), Tier::Balanced);
+}
+'''
+
+[[tasks]]
+id = "toon-shorter-only"
+file = "src/main.rs"
+prompt = "Fix the regression in src/main.rs: the toon command should keep the original JSON when the TOON encoding is longer. Run the Rust tests."
+healthy = "if encoded.len() < raw.len() || *force {"
+broken = "if encoded.len() > raw.len() || *force {"
+test = '''
+use std::{fs, process::Command};
+#[test]
+fn regression() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("input.json");
+    fs::write(&path, "[]").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ai-router")).args(["toon", "--input", path.to_str().unwrap()]).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "[]");
+}
+'''
