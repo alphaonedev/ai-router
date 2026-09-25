@@ -132,7 +132,7 @@ pub fn classify(task: &str) -> Tier {
         Tier::Balanced
     }
 }
-fn choose<'a>(models: &'a [Model], floor: Tier) -> Option<&'a Model> {
+fn choose(models: &[Model], floor: Tier) -> Option<&Model> {
     models
         .iter()
         .filter(|m| m.tier >= floor)
