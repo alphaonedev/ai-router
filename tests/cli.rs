@@ -3,7 +3,7 @@ use std::process::{Command, Stdio};
 #[test]
 fn launch_plans_cover_three_harnesses() {
     let binary = env!("CARGO_BIN_EXE_ai-router");
-    let config = concat!(env!("CARGO_MANIFEST_DIR"), "/router.json");
+    let config = concat!(env!("CARGO_MANIFEST_DIR"), "/router.toml");
     for (client, expected) in [
         ("claude", "--print"),
         ("codex", "exec"),
@@ -41,7 +41,7 @@ fn launch_plans_cover_three_harnesses() {
 #[test]
 fn route_json_is_stdin_stdout_protocol() {
     let binary = env!("CARGO_BIN_EXE_ai-router");
-    let config = concat!(env!("CARGO_MANIFEST_DIR"), "/router.json");
+    let config = concat!(env!("CARGO_MANIFEST_DIR"), "/router.toml");
     let mut child = Command::new(binary)
         .args(["--config", config, "route-json"])
         .stdin(Stdio::piped())

@@ -9,6 +9,7 @@ use std::{
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Model {
     pub id: String,
     pub tier: Tier,
@@ -25,6 +26,7 @@ pub enum Tier {
     Deep,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub policy_version: u32,
     pub default: Tier,
@@ -33,8 +35,153 @@ pub struct Config {
     pub jev: JevConfig,
     #[serde(default)]
     pub paw: PawConfig,
+    #[serde(default)]
+    pub decision_service: DecisionServiceConfig,
+    #[serde(default)]
+    pub openrouter: OpenRouterConfig,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionServiceConfig {
+    #[serde(default = "default_decision_service_name")]
+    pub name: String,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_decision_service_url")]
+    pub base_url: String,
+    #[serde(default = "default_decision_service_model")]
+    pub model: String,
+    #[serde(default = "default_decision_service_path")]
+    pub path: String,
+    #[serde(default = "default_decision_service_margin")]
+    pub min_margin: f64,
+}
+fn default_decision_service_name() -> String {
+    "clm".into()
+}
+fn default_decision_service_url() -> String {
+    "http://127.0.0.1:8700".into()
+}
+fn default_decision_service_model() -> String {
+    "clm-latest".into()
+}
+fn default_decision_service_path() -> String {
+    "/v1/systemone".into()
+}
+fn default_decision_service_margin() -> f64 {
+    0.2
+}
+impl Default for DecisionServiceConfig {
+    fn default() -> Self {
+        Self {
+            name: default_decision_service_name(),
+            enabled: false,
+            base_url: default_decision_service_url(),
+            model: default_decision_service_model(),
+            path: default_decision_service_path(),
+            min_margin: default_decision_service_margin(),
+        }
+    }
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenRouterConfig {
+    #[serde(default = "default_openrouter_url")]
+    pub base_url: String,
+    #[serde(default = "default_openrouter_key_env")]
+    pub api_key_env: String,
+}
+fn default_openrouter_url() -> String {
+    "https://openrouter.ai/api/v1".into()
+}
+fn default_openrouter_key_env() -> String {
+    "OPENROUTER_API_KEY".into()
+}
+impl Default for OpenRouterConfig {
+    fn default() -> Self {
+        Self {
+            base_url: default_openrouter_url(),
+            api_key_env: default_openrouter_key_env(),
+        }
+    }
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct OpenRouterResult {
+    pub model: String,
+    pub content: String,
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+}
+fn checked_api_url(base: &str) -> Result<String, String> {
+    let url = url::Url::parse(base).map_err(|e| e.to_string())?;
+    let loopback = matches!(
+        url.host_str(),
+        Some("127.0.0.1" | "localhost" | "::1" | "[::1]")
+    );
+    if (!loopback && url.scheme() != "https") || !["http", "https"].contains(&url.scheme()) {
+        return Err("remote API requires HTTPS; localhost may use HTTP".into());
+    }
+    Ok(base.trim_end_matches('/').to_string())
+}
+pub fn openrouter_chat(
+    cfg: &OpenRouterConfig,
+    model: &str,
+    task: &str,
+    key: &str,
+) -> Result<OpenRouterResult, String> {
+    if key.is_empty() {
+        return Err("OpenRouter API key is empty".into());
+    }
+    let base = checked_api_url(&cfg.base_url)?;
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(120)))
+        .build()
+        .into();
+    let body = serde_json::json!({"model":model,"messages":[{"role":"user","content":task}],"stream":false});
+    let response: serde_json::Value = agent
+        .post(&format!("{base}/chat/completions"))
+        .header("Authorization", &format!("Bearer {key}"))
+        .header("HTTP-Referer", "https://alphaonedev.github.io/ai-router/")
+        .header("X-OpenRouter-Title", "ai-router")
+        .send_json(&body)
+        .map_err(|e| e.to_string())?
+        .body_mut()
+        .read_json()
+        .map_err(|e| e.to_string())?;
+    let content = response["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or("OpenRouter response has no text content")?
+        .to_string();
+    Ok(OpenRouterResult {
+        model: response["model"].as_str().unwrap_or(model).to_string(),
+        content,
+        prompt_tokens: response["usage"]["prompt_tokens"].as_u64(),
+        completion_tokens: response["usage"]["completion_tokens"].as_u64(),
+    })
+}
+pub fn openrouter_models(cfg: &OpenRouterConfig) -> Result<Vec<String>, String> {
+    let base = checked_api_url(&cfg.base_url)?;
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(15)))
+        .build()
+        .into();
+    let response: serde_json::Value = agent
+        .get(&format!("{base}/models"))
+        .call()
+        .map_err(|e| e.to_string())?
+        .body_mut()
+        .read_json()
+        .map_err(|e| e.to_string())?;
+    let data = response["data"]
+        .as_array()
+        .ok_or("OpenRouter model list missing")?;
+    Ok(data
+        .iter()
+        .filter_map(|m| m["id"].as_str().map(str::to_string))
+        .collect())
 }
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct PawConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -44,6 +191,7 @@ pub struct PawConfig {
     pub local_dir: String,
 }
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct JevConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -172,7 +320,7 @@ fn record_event(req: &Request, cfg: &Config, dir: Option<&Path>, decision: &Deci
 }
 
 pub fn load_config(path: &Path) -> Result<Config, String> {
-    serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+    toml::from_str(&fs::read_to_string(path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
 }
 pub fn normalize(task: &str) -> String {
     task.split_whitespace()
@@ -199,6 +347,17 @@ pub fn cache_key(req: &Request, cfg: &Config) -> String {
         cfg.paw.enabled,
         cfg.paw.slug,
         cfg.paw.local_dir
+    ));
+    h.update(format!(
+        "|{}|{}|{}|{}|{}|{}|{}|{}",
+        cfg.decision_service.name,
+        cfg.decision_service.enabled,
+        cfg.decision_service.base_url,
+        cfg.decision_service.model,
+        cfg.decision_service.path,
+        cfg.decision_service.min_margin,
+        cfg.openrouter.base_url,
+        cfg.openrouter.api_key_env
     ));
     hex::encode(h.finalize())
 }
@@ -314,6 +473,68 @@ fn jev_choice(req: &Request, models: &[Model], min_confidence: f64) -> Result<St
         Err("Jev chose unavailable model".into())
     }
 }
+fn system_one_choice(req: &Request, cfg: &DecisionServiceConfig) -> Result<Option<Tier>, String> {
+    if !(0.0..=1.0).contains(&cfg.min_margin) {
+        return Err("decision service min_margin must be in [0,1]".into());
+    }
+    let url = url::Url::parse(&cfg.base_url).map_err(|e| e.to_string())?;
+    let loopback = matches!(
+        url.host_str(),
+        Some("127.0.0.1" | "localhost" | "::1" | "[::1]")
+    );
+    if req.offline && !loopback {
+        return Err("offline request cannot use remote decision service".into());
+    }
+    let base = checked_api_url(&cfg.base_url)?;
+    if !cfg.path.starts_with('/') || cfg.path.starts_with("//") {
+        return Err("decision service path must start with one slash".into());
+    }
+    let endpoint = format!("{base}{}", cfg.path);
+    let mut body = serde_json::json!({
+        "state": req.task,
+        "questions": { "route": {
+            "type": "choice",
+            "instructions": "Choose the least costly model tier that can complete this software task reliably. Abstain if unclear.",
+            "criteria": {
+                "fast": "Bounded low-risk formatting, extraction, summary, or explanation",
+                "balanced": "Normal implementation, debugging, testing, and planning",
+                "deep": "Security, production incidents, architecture, migration, complex debugging, or consequential work",
+                "abstain": "Insufficient or conflicting task information"
+            }
+        }}
+    });
+    if !cfg.model.is_empty() {
+        body["model"] = serde_json::Value::String(cfg.model.clone());
+    }
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(3)))
+        .build()
+        .into();
+    let response: serde_json::Value = agent
+        .post(&endpoint)
+        .send_json(&body)
+        .map_err(|e| e.to_string())?
+        .body_mut()
+        .read_json()
+        .map_err(|e| e.to_string())?;
+    let answer = &response["answers"]["route"];
+    let margin = answer["confidence"]
+        .as_f64()
+        .ok_or("decision service confidence missing")?;
+    if !margin.is_finite() || margin < cfg.min_margin {
+        return Err("decision service margin below threshold".into());
+    }
+    match answer["choice"]
+        .as_str()
+        .ok_or("decision service choice missing")?
+    {
+        "fast" => Ok(Some(Tier::Fast)),
+        "balanced" => Ok(Some(Tier::Balanced)),
+        "deep" => Ok(Some(Tier::Deep)),
+        "abstain" => Ok(None),
+        _ => Err("decision service returned an unknown class".into()),
+    }
+}
 pub fn route(req: &Request, cfg: &Config, cache_dir: Option<&Path>) -> Result<Decision, String> {
     let start = std::time::Instant::now();
     let models = cfg.models.get(&req.client).ok_or("unsupported client")?;
@@ -397,7 +618,28 @@ pub fn route(req: &Request, cfg: &Config, cache_dir: Option<&Path>) -> Result<De
     }
     .to_string();
     let mut reason = paw_reason.unwrap_or_else(|| format!("local classification: {tier:?}"));
-    if cfg.jev.enabled && !req.offline && tier == Tier::Balanced && models.len() >= 2 {
+    let mut service_accepted = false;
+    if cfg.decision_service.enabled && tier == Tier::Balanced && source != "paw" {
+        match system_one_choice(req, &cfg.decision_service) {
+            Ok(Some(t)) => {
+                if let Some(m) = choose(models, t.max(floor)) {
+                    selected = m;
+                    source = "system_one".into();
+                    reason = format!("validated {} choice", cfg.decision_service.name);
+                    service_accepted = true;
+                }
+            }
+            Ok(None) => reason = "decision service abstained; local fallback".into(),
+            Err(e) => reason = format!("decision service unavailable; local fallback: {e}"),
+        }
+    }
+    if cfg.jev.enabled
+        && !req.offline
+        && tier == Tier::Balanced
+        && models.len() >= 2
+        && !service_accepted
+        && source != "paw"
+    {
         match jev_choice(req, models, cfg.jev.min_confidence) {
             Ok(id) => {
                 if let Some(m) = models.iter().find(|m| m.id == id && m.tier >= floor) {
@@ -434,6 +676,53 @@ pub fn route(req: &Request, cfg: &Config, cache_dir: Option<&Path>) -> Result<De
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
+    };
+    fn mock_json(body: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request);
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body);
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        format!("http://{addr}")
+    }
+    #[test]
+    fn local_system_one_choice_is_validated_by_policy() {
+        let mut cfg: Config = toml::from_str(include_str!("../router.toml")).unwrap();
+        cfg.decision_service.enabled = true;
+        cfg.decision_service.base_url =
+            mock_json(r#"{"answers":{"route":{"choice":"fast","confidence":0.8}}}"#);
+        let req = Request {
+            client: "claude".into(),
+            task: "Implement a normal feature".into(),
+            model: None,
+            min_tier: Some(Tier::Balanced),
+            high_stakes: false,
+            offline: true,
+        };
+        let decision = route(&req, &cfg, None).unwrap();
+        assert_eq!(decision.source, "system_one");
+        assert_eq!(decision.tier, Tier::Balanced);
+    }
+    #[test]
+    fn openrouter_chat_uses_selected_model_and_usage() {
+        let cfg = OpenRouterConfig {
+            base_url: mock_json(
+                r#"{"model":"test/model","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":1}}"#,
+            ),
+            api_key_env: "TEST_KEY".into(),
+        };
+        let result = openrouter_chat(&cfg, "test/model", "hello", "key").unwrap();
+        assert_eq!(result.content, "ok");
+        assert_eq!(result.prompt_tokens, Some(4));
+    }
     #[test]
     fn savings_requires_quality_parity() {
         let r = savings(&[Measurement {
@@ -448,7 +737,7 @@ mod tests {
     }
     #[test]
     fn precedence_and_risk() {
-        let cfg: Config = serde_json::from_str(include_str!("../router.json")).unwrap();
+        let cfg: Config = toml::from_str(include_str!("../router.toml")).unwrap();
         let mut r = Request {
             client: "codex".into(),
             task: "format this".into(),
@@ -465,7 +754,7 @@ mod tests {
     }
     #[test]
     fn cache_roundtrip() {
-        let cfg: Config = serde_json::from_str(include_str!("../router.json")).unwrap();
+        let cfg: Config = toml::from_str(include_str!("../router.toml")).unwrap();
         let r = Request {
             client: "claude".into(),
             task: "explain this".into(),

@@ -1,4 +1,7 @@
-use ai_router::{load_config, route, savings, Decision, Measurement, Request, Tier};
+use ai_router::{
+    load_config, openrouter_chat, openrouter_models, route, savings, Decision, Measurement,
+    Request, Tier,
+};
 use clap::{Parser, Subcommand};
 use std::{
     io::{self, Read},
@@ -13,7 +16,7 @@ mod observability;
     about = "Local-first model routing for coding CLIs"
 )]
 struct Cli {
-    #[arg(long, global = true, default_value = "router.json")]
+    #[arg(long, global = true, default_value = "router.toml")]
     config: PathBuf,
     #[arg(long, global = true)]
     cache_dir: Option<PathBuf>,
@@ -22,6 +25,8 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Check configured OpenRouter model IDs against the live catalog.
+    OpenrouterModels,
     /// Compile and download a PAW classifier program (requires --features paw and PAW credentials).
     PawCompile {
         #[arg(long)]
@@ -112,7 +117,7 @@ fn launch_plan(
         ["--model", "-m", "--effort", "--reasoning-effort"].contains(&arg.as_str())
             || arg.starts_with("--model=")
     }) {
-        return Err("model and effort flags must use ai-router options or router.json".into());
+        return Err("model and effort flags must use ai-router options or router.toml".into());
     }
     let mut args = vec!["--model".to_string(), decision.model.clone()];
     if let Some(e) = &decision.effort {
@@ -181,6 +186,20 @@ fn cache(cli: &Cli) -> Option<PathBuf> {
 fn main() -> Result<(), String> {
     let cli = Cli::parse();
     match &cli.command {
+        Action::OpenrouterModels => {
+            let cfg = load_config(&cli.config)?;
+            let catalog = openrouter_models(&cfg.openrouter)?;
+            let configured = cfg
+                .models
+                .get("openrouter")
+                .ok_or("no OpenRouter models configured")?;
+            let result: Vec<_> = configured.iter().map(|m|serde_json::json!({"id":m.id,"tier":m.tier,"available":catalog.contains(&m.id)})).collect();
+            println!(
+                "{}",
+                serde_json::to_string(&result).map_err(|e| e.to_string())?
+            );
+            Ok(())
+        }
         Action::PawCompile { spec, slug } => {
             #[cfg(feature = "paw")]
             {
@@ -349,6 +368,30 @@ fn main() -> Result<(), String> {
                 offline: *offline,
             };
             let d = route(&req, &cfg, cache(&cli).as_deref())?;
+            if client == "openrouter" {
+                if *interactive || !extra.is_empty() {
+                    return Err("OpenRouter API supports noninteractive single tasks here; no CLI pass-through arguments".into());
+                }
+                if *dry_run {
+                    println!(
+                        "{}",
+                        serde_json::json!({"provider":"openrouter","model":d.model,"decision":d})
+                    );
+                    return Ok(());
+                }
+                if *offline {
+                    return Err("offline mode cannot invoke OpenRouter API".into());
+                }
+                let key = std::env::var(&cfg.openrouter.api_key_env)
+                    .map_err(|_| format!("{} unset", cfg.openrouter.api_key_env))?;
+                let result = openrouter_chat(&cfg.openrouter, &d.model, task, &key)?;
+                println!("{}", result.content);
+                eprintln!(
+                    "ai-router: {} ({}); input tokens {:?}, output tokens {:?}",
+                    result.model, d.source, result.prompt_tokens, result.completion_tokens
+                );
+                return Ok(());
+            }
             let plan = launch_plan(client, task, *interactive, extra, d)?;
             if *dry_run {
                 println!(
