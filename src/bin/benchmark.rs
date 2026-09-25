@@ -34,8 +34,16 @@ struct Task {
     id: String,
     file: String,
     prompt: String,
+    #[serde(default)]
     healthy: String,
+    #[serde(default)]
     broken: String,
+    #[serde(default)]
+    extra_file: Option<String>,
+    #[serde(default)]
+    extra_healthy: String,
+    #[serde(default)]
+    extra_broken: String,
     test: String,
 }
 
@@ -81,6 +89,21 @@ fn check(cwd: &Path, args: &[&str]) -> Result<bool, String> {
     Ok(status.success())
 }
 
+fn mutate(root: &Path, file: &str, healthy: &str, broken: &str, id: &str) -> Result<(), String> {
+    if healthy.is_empty() {
+        if broken.is_empty() {
+            return Ok(());
+        }
+        return Err(format!("{id} has replacement but no source text"));
+    }
+    let path = root.join(file);
+    let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    if raw.matches(healthy).count() != 1 {
+        return Err(format!("{id} mutation in {file} is not unique"));
+    }
+    fs::write(path, raw.replacen(healthy, broken, 1)).map_err(|e| e.to_string())
+}
+
 fn prepare(repo: &Path, root: &Path, source_ref: &str, task: &Task) -> Result<(), String> {
     let cloned = run(Command::new("git")
         .args(["clone", "--quiet", "--local"])
@@ -101,12 +124,16 @@ fn prepare(repo: &Path, root: &Path, source_ref: &str, task: &Task) -> Result<()
             String::from_utf8_lossy(&checkout.stderr)
         ));
     }
-    let path = root.join(&task.file);
-    let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    if task.healthy.is_empty() || raw.matches(&task.healthy).count() != 1 {
-        return Err(format!("{} mutation is not unique", task.id));
+    mutate(root, &task.file, &task.healthy, &task.broken, &task.id)?;
+    if let Some(file) = &task.extra_file {
+        mutate(
+            root,
+            file,
+            &task.extra_healthy,
+            &task.extra_broken,
+            &task.id,
+        )?;
     }
-    fs::write(path, raw.replacen(&task.healthy, &task.broken, 1)).map_err(|e| e.to_string())?;
     fs::write(root.join("tests/benchmark_regression.rs"), &task.test).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -203,12 +230,17 @@ fn main() -> Result<(), String> {
             mode: "grok-single-agent".into(),
         };
         let start = Instant::now();
-        let routed_output = run(Command::new(&router_bin)
+        let mut routed_command = Command::new(&router_bin);
+        routed_command
             .arg("--config")
             .arg(&config_path)
             .args(["adaptive", "--task", &task.prompt, "--workdir"])
             .arg(&routed_dir)
-            .args(["--file", &task.file]))?;
+            .args(["--file", &task.file]);
+        if let Some(extra_file) = &task.extra_file {
+            routed_command.args(["--file", extra_file]);
+        }
+        let routed_output = run(&mut routed_command)?;
         let routed_duration = start.elapsed().as_millis();
         save_output(&task_dir.join("routed-agent"), &routed_output)?;
         let routed_json = parse_json(&routed_output)?;

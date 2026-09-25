@@ -42,7 +42,7 @@ enum Action {
         #[arg(long)]
         min_tier: Option<String>,
         #[arg(long)]
-        file: Option<PathBuf>,
+        file: Vec<PathBuf>,
     },
     /// Run a persistent lead and sidekick workflow from TOML roles.
     Fusion {
@@ -236,7 +236,7 @@ fn main() -> Result<(), String> {
             if *dry_run {
                 println!(
                     "{}",
-                    serde_json::json!({"routing":decision,"execution":fusion::adaptive_plan(&cfg, workdir, decision.tier)?,"patch_file":file})
+                    serde_json::json!({"routing":decision,"execution":fusion::adaptive_plan(&cfg, workdir, decision.tier)?,"patch_files":file})
                 );
             } else {
                 let report = fusion::adaptive(
@@ -245,7 +245,7 @@ fn main() -> Result<(), String> {
                     workdir,
                     cache(&cli).as_deref(),
                     decision.tier,
-                    file.as_deref(),
+                    file,
                     *offline,
                 )?;
                 println!(

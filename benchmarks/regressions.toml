@@ -162,3 +162,55 @@ fn regression() {
     }
 }
 '''
+
+[[tasks]]
+id = "saved-compute-feature"
+file = "src/lib.rs"
+prompt = "Add a public saved_compute field to SavingsReport in src/lib.rs. It must equal baseline_compute minus routed_compute, including a negative value when routing costs more. Run the Rust tests."
+test = '''
+use ai_router::{savings, Measurement};
+#[test]
+fn regression() {
+    for (routed, expected) in [(6.0, 4.0), (12.0, -2.0)] {
+        let report = savings(&[Measurement { baseline_compute: 10.0, routed_compute: routed, baseline_success: true, routed_success: true }]).unwrap();
+        assert_eq!(report.saved_compute, expected);
+    }
+}
+'''
+
+[[tasks]]
+id = "minimum-tier-across-cli-and-core"
+file = "src/main.rs"
+prompt = "Fix the min-tier floor in both src/main.rs adaptive CLI and src/lib.rs routing core. An adaptive dry run with --min-tier deep and a direct route request with min_tier=deep must select the deep tier. Run the Rust tests."
+healthy = '''
+                client: cfg.fusion.lead.client.clone(),
+                task: task.clone(),
+                model: None,
+                min_tier: tier(min_tier.clone())?,
+'''
+broken = '''
+                client: cfg.fusion.lead.client.clone(),
+                task: task.clone(),
+                model: None,
+                min_tier: None,
+'''
+extra_file = "src/lib.rs"
+extra_healthy = "req.min_tier.unwrap_or(Tier::Fast)"
+extra_broken = "Tier::Fast"
+test = '''
+use ai_router::{route, Config, Request, Tier};
+use std::process::Command;
+#[test]
+fn regression() {
+    let config: Config = toml::from_str(include_str!("../router.toml")).unwrap();
+    let request = Request { client: "codex".into(), task: "fix parser".into(), model: None, min_tier: Some(Tier::Deep), high_stakes: false, offline: true };
+    assert_eq!(route(&request, &config, None).unwrap().tier, Tier::Deep);
+    let output = Command::new(env!("CARGO_BIN_EXE_ai-router"))
+        .args(["adaptive", "--task", "fix parser", "--min-tier", "deep", "--dry-run"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output().unwrap();
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["routing"]["tier"], "deep");
+}
+'''
