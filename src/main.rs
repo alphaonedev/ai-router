@@ -1,10 +1,11 @@
-use ai_router::{load_config, route, Request, Tier};
+use ai_router::{load_config, route, savings, Decision, Measurement, Request, Tier};
 use clap::{Parser, Subcommand};
 use std::{
     io::{self, Read},
     path::PathBuf,
     process::Command,
 };
+mod observability;
 #[derive(Parser)]
 #[command(
     name = "ai-router",
@@ -21,6 +22,30 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Compile and download a PAW classifier program (requires --features paw and PAW credentials).
+    PawCompile {
+        #[arg(long)]
+        spec: PathBuf,
+        #[arg(long)]
+        slug: String,
+    },
+    /// Watch routing decisions in the terminal.
+    Watch {
+        #[arg(long, default_value_t = 2)]
+        interval: u64,
+        #[arg(long)]
+        once: bool,
+        #[arg(long)]
+        measurements: Option<PathBuf>,
+    },
+    /// Serve the local live dashboard on 127.0.0.1.
+    Dashboard {
+        #[arg(long, default_value_t = 8747)]
+        port: u16,
+        #[arg(long)]
+        measurements: Option<PathBuf>,
+    },
+    RouteJson,
     Route {
         #[arg(long)]
         client: String,
@@ -39,6 +64,10 @@ enum Action {
         client: String,
         #[arg(long)]
         task: String,
+        #[arg(long)]
+        interactive: bool,
+        #[arg(long)]
+        dry_run: bool,
         #[arg(long)]
         model: Option<String>,
         #[arg(long)]
@@ -59,6 +88,68 @@ enum Action {
     Evaluate {
         file: PathBuf,
     },
+    Savings {
+        file: PathBuf,
+    },
+}
+#[derive(serde::Serialize)]
+struct LaunchPlan {
+    program: String,
+    args: Vec<String>,
+    decision: Decision,
+}
+fn launch_plan(
+    client: &str,
+    task: &str,
+    interactive: bool,
+    extra: &[String],
+    decision: Decision,
+) -> Result<LaunchPlan, String> {
+    if !["claude", "codex", "grok"].contains(&client) {
+        return Err("unsupported client".into());
+    }
+    if extra.iter().any(|arg| {
+        ["--model", "-m", "--effort", "--reasoning-effort"].contains(&arg.as_str())
+            || arg.starts_with("--model=")
+    }) {
+        return Err("model and effort flags must use ai-router options or router.json".into());
+    }
+    let mut args = vec!["--model".to_string(), decision.model.clone()];
+    if let Some(e) = &decision.effort {
+        match client {
+            "claude" => args.extend(["--effort".into(), e.clone()]),
+            "grok" => args.extend(["--reasoning-effort".into(), e.clone()]),
+            "codex" => args.extend(["-c".into(), format!("model_reasoning_effort=\"{e}\"")]),
+            _ => unreachable!(),
+        }
+    }
+    match client {
+        "claude" => {
+            if !interactive {
+                args.push("--print".into());
+            }
+            args.push(task.into());
+        }
+        "codex" => {
+            if !interactive {
+                args.push("exec".into());
+            }
+            args.push(task.into());
+        }
+        "grok" => {
+            if !interactive {
+                args.push("--single".into());
+            }
+            args.push(task.into());
+        }
+        _ => unreachable!(),
+    }
+    args.extend(extra.iter().cloned());
+    Ok(LaunchPlan {
+        program: client.into(),
+        args,
+        decision,
+    })
 }
 fn tier(s: Option<String>) -> Result<Option<Tier>, String> {
     s.map(|v| {
@@ -90,6 +181,75 @@ fn cache(cli: &Cli) -> Option<PathBuf> {
 fn main() -> Result<(), String> {
     let cli = Cli::parse();
     match &cli.command {
+        Action::PawCompile { spec, slug } => {
+            #[cfg(feature = "paw")]
+            {
+                use paw_rs::paw_core::{CompileRequest, PawClient, PawConfig};
+                let instructions = std::fs::read_to_string(spec).map_err(|e| e.to_string())?;
+                let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+                let config = PawConfig::from_env();
+                let client = PawClient::new(&config);
+                let request = CompileRequest::builder()
+                    .spec(instructions)
+                    .slug(slug)
+                    .build()
+                    .map_err(|e| e.to_string())?;
+                let program = runtime
+                    .block_on(client.compile(request))
+                    .map_err(|e| e.to_string())?;
+                let directory = runtime
+                    .block_on(client.download_paw(&program.id))
+                    .map_err(|e| e.to_string())?;
+                println!(
+                    "{}",
+                    serde_json::json!({"id":program.id,"slug":program.slug,"local_dir":directory})
+                );
+                Ok(())
+            }
+            #[cfg(not(feature = "paw"))]
+            {
+                let _ = (spec, slug);
+                Err("PAW feature not compiled; build with --features paw".into())
+            }
+        }
+        Action::Watch {
+            interval,
+            once,
+            measurements,
+        } => {
+            let dir = cache(&cli).ok_or("cache directory unavailable")?;
+            observability::watch(&dir, measurements.as_deref(), *interval, *once);
+            Ok(())
+        }
+        Action::Dashboard { port, measurements } => {
+            let dir = cache(&cli).ok_or("cache directory unavailable")?;
+            observability::serve(&dir, measurements.as_deref(), *port)
+        }
+        Action::RouteJson => {
+            let cfg = load_config(&cli.config)?;
+            let mut raw = String::new();
+            io::stdin()
+                .read_to_string(&mut raw)
+                .map_err(|e| e.to_string())?;
+            let req: Request = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+            let d = route(&req, &cfg, cache(&cli).as_deref())?;
+            println!("{}", serde_json::to_string(&d).map_err(|e| e.to_string())?);
+            Ok(())
+        }
+        Action::Savings { file } => {
+            let raw = std::fs::read_to_string(file).map_err(|e| e.to_string())?;
+            let records = raw
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(serde_json::from_str::<Measurement>)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            println!(
+                "{}",
+                serde_json::to_string(&savings(&records)?).map_err(|e| e.to_string())?
+            );
+            Ok(())
+        }
         Action::Toon { input, force } => {
             let raw = if let Some(p) = input {
                 std::fs::read_to_string(p).map_err(|e| e.to_string())?
@@ -171,6 +331,8 @@ fn main() -> Result<(), String> {
         Action::Run {
             client,
             task,
+            interactive,
+            dry_run,
             model,
             min_tier,
             high_stakes,
@@ -187,24 +349,20 @@ fn main() -> Result<(), String> {
                 offline: *offline,
             };
             let d = route(&req, &cfg, cache(&cli).as_deref())?;
-            let mut cmd = Command::new(client);
-            cmd.arg("--model").arg(&d.model);
-            if client == "claude" {
-                if let Some(e) = &d.effort {
-                    cmd.arg("--effort").arg(e);
-                }
+            let plan = launch_plan(client, task, *interactive, extra, d)?;
+            if *dry_run {
+                println!(
+                    "{}",
+                    serde_json::to_string(&plan).map_err(|e| e.to_string())?
+                );
+                return Ok(());
             }
-            if client == "claude" {
-                cmd.arg("--print").arg(task);
-            } else if client == "codex" {
-                cmd.arg("exec").arg(task);
-            } else if client == "grok" {
-                cmd.arg("--single").arg(task);
-            } else {
-                return Err("unsupported client".into());
-            }
-            cmd.args(extra);
-            eprintln!("ai-router: {} ({})", d.model, d.source);
+            let mut cmd = Command::new(&plan.program);
+            cmd.args(&plan.args);
+            eprintln!(
+                "ai-router: {} ({})",
+                plan.decision.model, plan.decision.source
+            );
             let status = cmd.status().map_err(|e| e.to_string())?;
             std::process::exit(status.code().unwrap_or(1))
         }

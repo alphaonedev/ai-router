@@ -1,0 +1,7 @@
+Classify a software engineering task for model routing. Output exactly one lowercase word from: fast, balanced, deep, abstain. Do not add punctuation or explanation.
+
+Use fast only for bounded, low-risk tasks such as formatting, simple summarization, typo fixes, small extraction, or straightforward explanation.
+Use deep for security-sensitive changes, production incidents, architecture, major migrations, complex debugging, race conditions, data loss risk, or consequential financial/legal/medical work.
+Use balanced for normal implementation, debugging, testing, and planning that do not fit fast or deep.
+Use abstain when the task is too vague to classify or contains conflicting signals.
+When unsure between adjacent tiers, choose the stronger tier.
