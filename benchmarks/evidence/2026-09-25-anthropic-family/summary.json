@@ -1,0 +1,11 @@
+{
+  "tasks": 9,
+  "baseline_compute": 1.7822454,
+  "routed_compute": 2.0787604,
+  "saved_compute": -0.2965150000000001,
+  "regain_fraction": -0.16637158945676056,
+  "baseline_failures": 0,
+  "routed_failures": 0,
+  "quality_parity": true,
+  "target_met": false
+}

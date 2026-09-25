@@ -1,0 +1,36 @@
+policy_version = 8
+default = "balanced"
+
+[decision_service]
+name = "jev-openrouter"
+enabled = true
+base_url = "https://openrouter.ai/api"
+path = "/alpha/decisions"
+model = "typesafe/jev-1.13"
+api_key_env = "OPENROUTER_API_KEY"
+min_margin = 0.2
+timeout_ms = 1000
+
+[[models.claude]]
+id = "claude-haiku-4-5"
+tier = "fast"
+
+[[models.claude]]
+id = "claude-sonnet-5"
+tier = "balanced"
+
+[[models.claude]]
+id = "claude-opus-5-5"
+tier = "deep"
+
+[[models.codex]]
+id = "gpt-6-luna"
+tier = "fast"
+
+[[models.codex]]
+id = "gpt-6-sol"
+tier = "balanced"
+
+[[models.codex]]
+id = "gpt-6-astra"
+tier = "deep"

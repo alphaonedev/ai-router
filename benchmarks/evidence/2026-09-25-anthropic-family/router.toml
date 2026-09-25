@@ -1,0 +1,70 @@
+policy_version = 7
+default = "balanced"
+
+[[models.claude]]
+id = "claude-haiku-4-5"
+tier = "fast"
+effort = "low"
+description = ""
+
+[[models.claude]]
+id = "claude-sonnet-5"
+tier = "balanced"
+effort = "medium"
+description = ""
+
+[[models.claude]]
+id = "claude-opus-5-5"
+tier = "deep"
+effort = "high"
+description = ""
+
+[[models.claude]]
+id = "claude-fable-5-1"
+tier = "deep"
+effort = "high"
+description = ""
+
+[jev]
+enabled = false
+min_confidence = 0.0
+
+[paw]
+enabled = false
+slug = ""
+local_dir = ""
+
+[decision_service]
+name = "kev"
+enabled = true
+base_url = "http://127.0.0.1:8009"
+model = "kev-latest"
+path = "/v1/systemone"
+min_margin = 0.2
+timeout_ms = 750
+
+[openrouter]
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+
+[relay]
+enabled = false
+max_corrections = 1
+max_handoff_chars = 6000
+timeout_secs = 900
+validation = []
+min_tier = "deep"
+
+[relay.lead]
+client = "codex"
+model = "gpt-6-astra"
+
+[relay.sidekick]
+client = "codex"
+model = "gpt-5.6-sol"
+
+[patch]
+enabled = false
+model = "google/gemini-3.5-flash-lite"
+max_file_bytes = 20000
+max_attempts = 2

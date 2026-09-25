@@ -159,6 +159,13 @@ pub struct DecisionServiceConfig {
     pub path: String,
     #[serde(default = "default_decision_service_margin")]
     pub min_margin: f64,
+    #[serde(default = "default_decision_service_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+}
+fn default_decision_service_timeout_ms() -> u64 {
+    750
 }
 fn default_decision_service_name() -> String {
     "clm".into()
@@ -184,6 +191,8 @@ impl Default for DecisionServiceConfig {
             model: default_decision_service_model(),
             path: default_decision_service_path(),
             min_margin: default_decision_service_margin(),
+            timeout_ms: default_decision_service_timeout_ms(),
+            api_key_env: None,
         }
     }
 }
@@ -621,6 +630,9 @@ fn system_one_choice(req: &Request, cfg: &DecisionServiceConfig) -> Result<Optio
     if !(0.0..=1.0).contains(&cfg.min_margin) {
         return Err("decision service min_margin must be in [0,1]".into());
     }
+    if !(100..=30_000).contains(&cfg.timeout_ms) {
+        return Err("decision service timeout_ms must be 100..30000".into());
+    }
     let url = url::Url::parse(&cfg.base_url).map_err(|e| e.to_string())?;
     let loopback = matches!(
         url.host_str(),
@@ -651,12 +663,19 @@ fn system_one_choice(req: &Request, cfg: &DecisionServiceConfig) -> Result<Optio
         body["model"] = serde_json::Value::String(cfg.model.clone());
     }
     let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_secs(3)))
+        .timeout_global(Some(std::time::Duration::from_millis(cfg.timeout_ms)))
         .max_redirects(0)
         .build()
         .into();
-    let response: serde_json::Value = agent
-        .post(&endpoint)
+    let mut request = agent.post(&endpoint);
+    if let Some(env_name) = &cfg.api_key_env {
+        if env_name.trim().is_empty() {
+            return Err("decision service api_key_env cannot be empty".into());
+        }
+        let key = std::env::var(env_name).map_err(|_| format!("{env_name} unset"))?;
+        request = request.header("Authorization", &format!("Bearer {key}"));
+    }
+    let response: serde_json::Value = request
         .send_json(&body)
         .map_err(|e| e.to_string())?
         .body_mut()

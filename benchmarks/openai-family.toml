@@ -1,0 +1,26 @@
+policy_version = 7
+default = "balanced"
+
+[decision_service]
+name = "kev"
+enabled = true
+base_url = "http://127.0.0.1:8009"
+model = "kev-latest"
+path = "/v1/systemone"
+min_margin = 0.2
+timeout_ms = 750
+
+[[models.codex]]
+id = "gpt-6-luna"
+tier = "fast"
+effort = "low"
+
+[[models.codex]]
+id = "gpt-6-sol"
+tier = "balanced"
+effort = "medium"
+
+[[models.codex]]
+id = "gpt-6-astra"
+tier = "deep"
+effort = "high"

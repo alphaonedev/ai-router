@@ -1,0 +1,31 @@
+policy_version = 7
+default = "balanced"
+
+[decision_service]
+name = "kev"
+enabled = true
+base_url = "http://127.0.0.1:8009"
+model = "kev-latest"
+path = "/v1/systemone"
+min_margin = 0.2
+timeout_ms = 750
+
+[[models.claude]]
+id = "claude-haiku-4-5"
+tier = "fast"
+effort = "low"
+
+[[models.claude]]
+id = "claude-sonnet-5"
+tier = "balanced"
+effort = "medium"
+
+[[models.claude]]
+id = "claude-opus-5-5"
+tier = "deep"
+effort = "high"
+
+[[models.claude]]
+id = "claude-fable-5-1"
+tier = "deep"
+effort = "high"

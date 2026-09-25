@@ -1,0 +1,55 @@
+policy_version = 8
+default = "balanced"
+
+[decision_service]
+name = "laya"
+enabled = true
+base_url = "http://127.0.0.1:8000"
+path = "/v1/systemone"
+min_margin = 0.2
+timeout_ms = 750
+
+[[models.claude]]
+id = "claude-haiku-4-5"
+tier = "fast"
+effort = "low"
+
+[[models.claude]]
+id = "claude-sonnet-5"
+tier = "balanced"
+effort = "medium"
+
+[[models.claude]]
+id = "claude-opus-5-5"
+tier = "deep"
+effort = "high"
+
+[[models.codex]]
+id = "gpt-6-luna"
+tier = "fast"
+effort = "low"
+
+[[models.codex]]
+id = "gpt-6-sol"
+tier = "balanced"
+effort = "medium"
+
+[[models.codex]]
+id = "gpt-6-astra"
+tier = "deep"
+effort = "high"
+
+[[models.grok]]
+id = "grok-4.7-build-fast"
+tier = "fast"
+effort = "low"
+
+[[models.grok]]
+id = "grok-4.7"
+tier = "balanced"
+effort = "medium"
+
+[[models.grok]]
+id = "grok-4.7"
+tier = "deep"
+effort = "high"

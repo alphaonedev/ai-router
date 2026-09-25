@@ -1,0 +1,14 @@
+{
+  "tasks": 8,
+  "planned_tasks": 9,
+  "complete": false,
+  "baseline_compute": 4.8839500000000005,
+  "routed_compute": 1.19579106,
+  "saved_compute": 3.6881589400000006,
+  "regain_fraction": 0.7551590290645891,
+  "baseline_failures": 0,
+  "routed_failures": 0,
+  "quality_parity_on_completed_tasks": true,
+  "target_met_on_completed_tasks": true,
+  "stop_reason": "Codex CLI authentication failed before ninth baseline completed"
+}
