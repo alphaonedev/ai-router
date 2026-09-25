@@ -46,6 +46,7 @@ dependencies = [
 name = "ai-router"
 version = "0.4.0"
 dependencies = [
+ "chrono",
  "clap",
  "hex",
  "paw-rs",

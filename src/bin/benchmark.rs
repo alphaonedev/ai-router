@@ -7,8 +7,49 @@ use std::{
     io::Write,
     path::{Component, Path, PathBuf},
     process::{Command, Output},
-    time::Instant,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread,
+    time::Duration,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
+
+fn baseline_event(run_id: &str, client: &str, model: &str, status: &str) {
+    let Some(dir) = std::env::var_os("XDG_CACHE_HOME")
+        .map(|path| PathBuf::from(path).join("ai-router"))
+        .or_else(|| {
+            std::env::var_os("HOME").map(|path| PathBuf::from(path).join(".cache/ai-router"))
+        })
+    else {
+        return;
+    };
+    if fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let record = serde_json::json!({
+        "timestamp": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+        "run_id": run_id,
+        "stage": "benchmark_baseline",
+        "status": status,
+        "client": client,
+        "model": model,
+        "duration_ms": null,
+        "input_tokens": null,
+        "output_tokens": null,
+        "cache_read_tokens": null,
+        "cache_write_tokens": null,
+        "cost_usd": null
+    });
+    if let Ok(mut file) = fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(dir.join("relay-events.jsonl"))
+    {
+        let _ = file.write_all(format!("{record}\n").as_bytes());
+    }
+}
 
 #[derive(Parser)]
 struct Cli {
@@ -313,7 +354,50 @@ fn main() -> Result<(), String> {
                 }
                 _ => unreachable!(),
             }
-            let baseline_output = run(&mut baseline_command)?;
+            let baseline_run_id = uuid::Uuid::new_v4().to_string();
+            baseline_event(
+                &baseline_run_id,
+                &cli.baseline_client,
+                baseline_model,
+                "running",
+            );
+            let active = Arc::new(AtomicBool::new(true));
+            let pulse = Arc::clone(&active);
+            let pulse_run = baseline_run_id.clone();
+            let pulse_client = cli.baseline_client.clone();
+            let pulse_model = baseline_model.to_string();
+            let heartbeat = thread::spawn(move || {
+                let mut elapsed = 0;
+                while pulse.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_secs(1));
+                    elapsed += 1;
+                    if elapsed >= 30 && pulse.load(Ordering::Relaxed) {
+                        baseline_event(&pulse_run, &pulse_client, &pulse_model, "running");
+                        elapsed = 0;
+                    }
+                }
+            });
+            let result = run(&mut baseline_command);
+            active.store(false, Ordering::Relaxed);
+            let _ = heartbeat.join();
+            let baseline_output = result.inspect_err(|_| {
+                baseline_event(
+                    &baseline_run_id,
+                    &cli.baseline_client,
+                    baseline_model,
+                    "failed",
+                );
+            })?;
+            baseline_event(
+                &baseline_run_id,
+                &cli.baseline_client,
+                baseline_model,
+                if baseline_output.status.success() {
+                    "complete"
+                } else {
+                    "failed"
+                },
+            );
             let baseline_duration = start.elapsed().as_millis();
             save_output(&task_dir.join("baseline-agent"), &baseline_output)?;
             let baseline_json = parse_json(&baseline_output)?;

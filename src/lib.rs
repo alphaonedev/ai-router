@@ -412,6 +412,8 @@ pub struct RouterEvent {
     pub model: String,
     pub tier: Tier,
     pub source: String,
+    #[serde(default)]
+    pub decision_backend: Option<String>,
     pub duration_ms: u128,
 }
 pub fn read_events(cache_dir: &Path) -> Vec<RouterEvent> {
@@ -419,7 +421,12 @@ pub fn read_events(cache_dir: &Path) -> Vec<RouterEvent> {
         return Vec::new();
     };
     raw.lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
+        .flat_map(|line| {
+            serde_json::Deserializer::from_str(line)
+                .into_iter::<RouterEvent>()
+                .filter_map(Result::ok)
+                .collect::<Vec<_>>()
+        })
         .collect()
 }
 fn record_event(req: &Request, cfg: &Config, dir: Option<&Path>, decision: &Decision) {
@@ -438,13 +445,15 @@ fn record_event(req: &Request, cfg: &Config, dir: Option<&Path>, decision: &Deci
         model: decision.model.clone(),
         tier: decision.tier,
         source: decision.source.clone(),
+        decision_backend: (decision.source == "system_one")
+            .then(|| cfg.decision_service.name.clone()),
         duration_ms: decision.duration_ms,
     };
     if let (Ok(mut file), Ok(line)) = (
         fs::OpenOptions::new().create(true).append(true).open(path),
         serde_json::to_string(&event),
     ) {
-        let _ = writeln!(file, "{line}");
+        let _ = file.write_all(format!("{line}\n").as_bytes());
     }
 }
 
@@ -820,6 +829,20 @@ mod tests {
         net::TcpListener,
         thread,
     };
+    #[test]
+    fn event_reader_recovers_joined_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = r#"{"timestamp":1,"client":"claude","task_id":"a","model":"sonnet","tier":"balanced","source":"rules","duration_ms":2}"#;
+        let second = r#"{"timestamp":2,"client":"codex","task_id":"b","model":"gpt-6-sol","tier":"balanced","source":"cache","duration_ms":1}"#;
+        fs::write(
+            dir.path().join("events.jsonl"),
+            format!("{first}{second}\n"),
+        )
+        .unwrap();
+        let events = read_events(dir.path());
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].model, "gpt-6-sol");
+    }
     fn mock_json(body: &'static str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();

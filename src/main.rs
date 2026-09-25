@@ -504,14 +504,40 @@ fn main() -> Result<(), String> {
                 }
                 let key = std::env::var(&cfg.openrouter.api_key_env)
                     .map_err(|_| format!("{} unset", cfg.openrouter.api_key_env))?;
-                let result = openrouter_chat(&cfg.openrouter, &d.model, task, &key)?;
+                let run_id = uuid::Uuid::new_v4().to_string();
+                let event_dir = cache(&cli);
+                relay::direct_run_event(event_dir.as_deref(), &run_id, client, &d.model, "running");
+                let result =
+                    openrouter_chat(&cfg.openrouter, &d.model, task, &key).inspect_err(|_| {
+                        relay::direct_run_event(
+                            event_dir.as_deref(),
+                            &run_id,
+                            client,
+                            &d.model,
+                            "failed",
+                        );
+                    })?;
                 if result.content.trim().is_empty() {
+                    relay::direct_run_event(
+                        event_dir.as_deref(),
+                        &run_id,
+                        client,
+                        &d.model,
+                        "failed",
+                    );
                     return Err("OpenRouter response has no text content".into());
                 }
                 println!("{}", result.content);
                 eprintln!(
                     "ai-router: {} ({}); input tokens {:?}, output tokens {:?}",
                     result.model, d.source, result.prompt_tokens, result.completion_tokens
+                );
+                relay::direct_run_event(
+                    event_dir.as_deref(),
+                    &run_id,
+                    client,
+                    &d.model,
+                    "complete",
                 );
                 return Ok(());
             }
@@ -529,7 +555,66 @@ fn main() -> Result<(), String> {
                 "ai-router: {} ({})",
                 plan.decision.model, plan.decision.source
             );
-            let status = cmd.status().map_err(|e| e.to_string())?;
+            let run_id = uuid::Uuid::new_v4().to_string();
+            let event_dir = cache(&cli);
+            relay::direct_run_event(
+                event_dir.as_deref(),
+                &run_id,
+                client,
+                &plan.decision.model,
+                "running",
+            );
+            let mut child = cmd.spawn().map_err(|e| {
+                relay::direct_run_event(
+                    event_dir.as_deref(),
+                    &run_id,
+                    client,
+                    &plan.decision.model,
+                    "failed",
+                );
+                e.to_string()
+            })?;
+            let mut last_heartbeat = std::time::Instant::now();
+            let status = loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break status,
+                    Ok(None) => {}
+                    Err(error) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        relay::direct_run_event(
+                            event_dir.as_deref(),
+                            &run_id,
+                            client,
+                            &plan.decision.model,
+                            "failed",
+                        );
+                        return Err(error.to_string());
+                    }
+                }
+                if last_heartbeat.elapsed() >= std::time::Duration::from_secs(30) {
+                    relay::direct_run_event(
+                        event_dir.as_deref(),
+                        &run_id,
+                        client,
+                        &plan.decision.model,
+                        "running",
+                    );
+                    last_heartbeat = std::time::Instant::now();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            };
+            relay::direct_run_event(
+                event_dir.as_deref(),
+                &run_id,
+                client,
+                &plan.decision.model,
+                if status.success() {
+                    "complete"
+                } else {
+                    "failed"
+                },
+            );
             std::process::exit(status.code().unwrap_or(1))
         }
     }

@@ -63,7 +63,7 @@ pub struct ValidationResult {
     pub duration_ms: u128,
     pub output_tail: String,
 }
-#[derive(Serialize, serde::Deserialize)]
+#[derive(Clone, Serialize, serde::Deserialize)]
 pub struct RelayEvent {
     pub timestamp: u64,
     pub run_id: String,
@@ -115,8 +115,22 @@ fn event(
         OpenOptions::new().create(true).append(true).open(path),
         serde_json::to_string(&item),
     ) {
-        let _ = writeln!(file, "{line}");
+        let _ = file.write_all(format!("{line}\n").as_bytes());
     }
+}
+
+pub fn direct_run_event(
+    cache: Option<&Path>,
+    run_id: &str,
+    client: &str,
+    model: &str,
+    status: &str,
+) {
+    let role = RelayRole {
+        client: client.into(),
+        model: model.into(),
+    };
+    event(cache, run_id, "direct_run", status, &role, None);
 }
 
 struct ResultText {
@@ -149,7 +163,7 @@ fn tracked_phase(
     run_id: &str,
 ) -> Result<ResultText, String> {
     event(cache, run_id, req.label, "running", role, None);
-    match run_phase(cfg, role, req) {
+    match run_phase(cfg, role, req, cache, run_id) {
         Ok(result) => {
             event(
                 cache,
@@ -339,7 +353,13 @@ fn parse_output(
     })
 }
 
-fn run_phase(cfg: &Config, role: &RelayRole, req: PhaseRequest<'_>) -> Result<ResultText, String> {
+fn run_phase(
+    cfg: &Config,
+    role: &RelayRole,
+    req: PhaseRequest<'_>,
+    cache: Option<&Path>,
+    run_id: &str,
+) -> Result<ResultText, String> {
     let m = model(cfg, role)?;
     let mut cmd = command(role, m, req.prompt, req.session, req.resume, req.readonly);
     let mut stdout = tempfile::tempfile().map_err(|e| e.to_string())?;
@@ -348,6 +368,7 @@ fn run_phase(cfg: &Config, role: &RelayRole, req: PhaseRequest<'_>) -> Result<Re
         .stdout(Stdio::from(stdout.try_clone().map_err(|e| e.to_string())?))
         .stderr(Stdio::from(stderr.try_clone().map_err(|e| e.to_string())?));
     let start = Instant::now();
+    let mut last_heartbeat = Instant::now();
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("cannot start {}: {e}", role.client))?;
@@ -362,6 +383,10 @@ fn run_phase(cfg: &Config, role: &RelayRole, req: PhaseRequest<'_>) -> Result<Re
                 "{} timed out after {} seconds",
                 req.label, cfg.relay.timeout_secs
             ));
+        }
+        if last_heartbeat.elapsed() >= Duration::from_secs(30) {
+            event(cache, run_id, req.label, "running", role, None);
+            last_heartbeat = Instant::now();
         }
         thread::sleep(Duration::from_millis(100));
     };
